@@ -1,10 +1,15 @@
-package test
+package kind
 
 import (
 	"fmt"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/flanksource/clicky"
+	"github.com/flanksource/clicky/exec"
+	"github.com/flanksource/commons-test/command"
+	"github.com/samber/lo"
 )
 
 type Kind struct {
@@ -12,9 +17,10 @@ type Kind struct {
 	Name        string `yaml:"name"`
 	UseExisting bool   `yaml:"use_existing"`
 	ColorOutput bool   `yaml:"color_output"`
-	
-	runner     *CommandRunner
-	lastResult CommandResult
+
+	runner     *command.Runner
+	kubectl    *exec.WrapperFunc
+	lastResult command.Result
 	lastError  error
 }
 
@@ -27,7 +33,7 @@ func NewKind(name string) *Kind {
 		Name:        name,
 		Version:     "latest",
 		ColorOutput: true,
-		runner:      NewCommandRunner(true),
+		runner:      command.NewCommandRunner(true),
 	}
 }
 
@@ -40,60 +46,58 @@ func (k *Kind) WithVersion(version string) *Kind {
 // NoColor disables colored output
 func (k *Kind) NoColor() *Kind {
 	k.ColorOutput = false
-	k.runner = NewCommandRunner(false)
+	k.runner = command.NewCommandRunner(false)
 	return k
 }
 
 // GetOrCreate gets an existing kind cluster or creates a new one
 func (k *Kind) GetOrCreate() *Kind {
-	k.runner.Printf(colorYellow, colorBold, "=== Kind Cluster: %s ===", k.Name)
-	
 	// Check if cluster already exists
 	result := k.runner.RunCommandQuiet("kind", "get", "clusters")
 	if result.Err == nil {
 		clusters := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 		for _, cluster := range clusters {
 			if cluster == k.Name {
-				k.runner.Printf(colorGray, "", "Using existing cluster: %s", k.Name)
+				k.runner.Debugf("Using existing cluster: %s", k.Name)
 				k.Use()
 				return k
 			}
 		}
 	}
-	
+
 	// Create new cluster
-	k.runner.Printf(colorBlue, "", "Creating new cluster: %s", k.Name)
-	
+	k.runner.Infof("Creating new cluster: %s", k.Name)
+
 	args := []string{"create", "cluster", "--name", k.Name}
 	if k.Version != "" && k.Version != "latest" {
 		args = append(args, "--image", fmt.Sprintf("kindest/node:%s", k.Version))
 	}
-	
+
 	k.lastResult = k.runner.RunCommand("kind", args...)
 	if k.lastResult.Err != nil {
 		k.lastError = fmt.Errorf("failed to create kind cluster: %s", k.lastResult.String())
 		return k
 	}
-	
+
 	// Wait for cluster to be ready
-	k.runner.Printf(colorGray, "", "Waiting for cluster to be ready...")
+	k.runner.Debugf("Waiting for cluster to be ready...")
 	k.waitForCluster()
-	
+
 	k.Use()
 	return k
 }
 
 // Use updates KUBECONFIG to use the kind cluster
 func (k *Kind) Use() *Kind {
-	k.runner.Printf(colorBlue, "", "Switching to cluster context: kind-%s", k.Name)
-	
+	k.runner.Infof("Switching to cluster context: kind-%s", k.Name)
+
 	// Export kubeconfig for the kind cluster
 	result := k.runner.RunCommandQuiet("kind", "export", "kubeconfig", "--name", k.Name)
 	if result.Err != nil {
 		k.lastError = fmt.Errorf("failed to export kubeconfig: %s", result.String())
 		return k
 	}
-	
+
 	// Set the current context
 	contextName := fmt.Sprintf("kind-%s", k.Name)
 	k.lastResult = k.runner.RunCommand("kubectl", "config", "use-context", contextName)
@@ -101,23 +105,23 @@ func (k *Kind) Use() *Kind {
 		k.lastError = fmt.Errorf("failed to switch context: %s", k.lastResult.String())
 		return k
 	}
-	
+
 	// Verify connection
-	k.runner.Printf(colorGray, "", "Verifying cluster connection...")
+	k.runner.Debugf("Verifying cluster connection...")
 	result = k.runner.RunCommandQuiet("kubectl", "cluster-info", "--context", contextName)
 	if result.Err != nil {
 		k.lastError = fmt.Errorf("failed to verify cluster connection: %s", result.String())
 		return k
 	}
-	
-	k.runner.Printf(colorGray, "", "Successfully connected to cluster: %s", k.Name)
+
+	k.runner.Debugf("Successfully connected to cluster: %s", k.Name)
 	return k
 }
 
 // Delete deletes the kind cluster
 func (k *Kind) Delete() *Kind {
-	k.runner.Printf(colorYellow, colorBold, "=== Deleting Kind Cluster: %s ===", k.Name)
-	
+	k.runner.Errorf("=== Deleting Kind Cluster: %s ===", k.Name)
+
 	k.lastResult = k.runner.RunCommand("kind", "delete", "cluster", "--name", k.Name)
 	if k.lastResult.Err != nil {
 		k.lastError = fmt.Errorf("failed to delete kind cluster: %s", k.lastResult.String())
@@ -127,8 +131,6 @@ func (k *Kind) Delete() *Kind {
 
 // LoadImage loads a docker image into the kind cluster
 func (k *Kind) LoadImage(image string) *Kind {
-	k.runner.Printf(colorBlue, "", "Loading image into cluster: %s", image)
-	
 	k.lastResult = k.runner.RunCommand("kind", "load", "docker-image", image, "--name", k.Name)
 	if k.lastResult.Err != nil {
 		k.lastError = fmt.Errorf("failed to load image: %s", k.lastResult.String())
@@ -151,7 +153,7 @@ func (k *Kind) Exists() bool {
 	if result.Err != nil {
 		return false
 	}
-	
+
 	clusters := strings.Split(strings.TrimSpace(result.Stdout), "\n")
 	for _, cluster := range clusters {
 		if cluster == k.Name {
@@ -167,7 +169,7 @@ func (k *Kind) Error() error {
 }
 
 // Result returns the last command result
-func (k *Kind) Result() CommandResult {
+func (k *Kind) Result() command.Result {
 	return k.lastResult
 }
 
@@ -198,18 +200,36 @@ func (k *Kind) SetKubeconfig() *Kind {
 		k.lastError = err
 		return k
 	}
-	
+
 	// Write kubeconfig to temp file
 	tempFile := fmt.Sprintf("/tmp/kind-%s-kubeconfig-%d", k.Name, time.Now().UnixNano())
-	cmd := k.runner.RunCommandQuiet("sh", "-c", fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", tempFile, kubeconfig))
-	if cmd.Err != nil {
-		k.lastError = fmt.Errorf("failed to write kubeconfig: %w", cmd.Err)
+	if err := os.WriteFile(tempFile, []byte(kubeconfig), 0600); err != nil {
+		k.lastError = fmt.Errorf("failed to write kubeconfig to temp file: %w", err)
 		return k
 	}
-	
 	// Set KUBECONFIG environment variable
 	os.Setenv("KUBECONFIG", tempFile)
-	k.runner.Printf(colorGray, "", "KUBECONFIG set to: %s", tempFile)
-	
+	k.runner.Debugf("KUBECONFIG set to: %s", tempFile)
+
 	return k
+}
+
+func (k Kind) Kubectl() exec.WrapperFunc {
+	if k.kubectl != nil {
+		return *k.kubectl
+	}
+	kubeconfig, err := k.GetKubeconfig()
+	if err != nil {
+		panic(err)
+	}
+
+	// Write kubeconfig to temp file
+	tempFile := fmt.Sprintf("/tmp/kind-%s-kubeconfig-%d", k.Name, time.Now().UnixNano())
+	if err := os.WriteFile(tempFile, []byte(kubeconfig), 0600); err != nil {
+		panic(fmt.Errorf("failed to write kubeconfig to temp file: %w", err))
+	}
+	p := clicky.Exec("kubectl", "--context", fmt.Sprintf("kind-%s", k.Name), "--kubeconfig", tempFile)
+	k.kubectl = lo.ToPtr(p.AsWrapper())
+	return *k.kubectl
+
 }

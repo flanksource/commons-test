@@ -8,16 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/flanksource/queue-exporter/pkg/activemq"
 )
 
 // ActiveMQContainer provides specialized ActiveMQ container management
 type ActiveMQContainer struct {
 	*Container
-	username   string
-	password   string
-	brokerURL  string
+	username      string
+	password      string
+	brokerURL     string
 	webConsoleURL string
 }
 
@@ -96,9 +94,9 @@ func NewActiveMQ(name, username, password string, reuse bool) (*ActiveMQContaine
 		},
 		Mounts: []Mount{
 			{
-				Source: activemqXmlDest,
-				Target: "/opt/apache-activemq/conf/activemq.xml",
-				Type:   "bind",
+				Source:   activemqXmlDest,
+				Target:   "/opt/apache-activemq/conf/activemq.xml",
+				Type:     "bind",
 				ReadOnly: true,
 			},
 			{
@@ -213,14 +211,14 @@ func (a *ActiveMQContainer) GetCredentials() (string, string) {
 	return a.username, a.password
 }
 
-// CreateClient creates a new ActiveMQ client connected to this container
-func (a *ActiveMQContainer) CreateClient() *activemq.Client {
-	return activemq.NewClient(a.webConsoleURL, a.username, a.password, "localhost")
-}
+// // CreateClient creates a new ActiveMQ client connected to this container
+// func (a *ActiveMQContainer) CreateClient() *activemq.Client {
+// 	return activemq.NewClient(a.webConsoleURL, a.username, a.password, "localhost")
+// }
 
 // waitForReady waits for ActiveMQ to be ready to accept connections
 func (a *ActiveMQContainer) waitForReady(ctx context.Context) error {
-	maxRetries := 60  // ActiveMQ can take longer to start than SQL Server
+	maxRetries := 60 // ActiveMQ can take longer to start than SQL Server
 	retryDelay := 2 * time.Second
 
 	a.Infof("Starting readiness check (max %d attempts, %v between attempts)", maxRetries, retryDelay)
@@ -329,17 +327,17 @@ func (a *ActiveMQContainer) HealthCheck() error {
 		return fmt.Errorf("health check failed - web console returned unexpected status %d", resp.StatusCode)
 	}
 
-	// Test ActiveMQ client connection
-	activemqClient := a.CreateClient()
-	if activemqClient == nil {
-		return fmt.Errorf("health check failed - cannot create ActiveMQ client")
-	}
+	// // Test ActiveMQ client connection
+	// 	activemqClient := a.CreateClient()
+	// 	if activemqClient == nil {
+	// 		return fmt.Errorf("health check failed - cannot create ActiveMQ client")
+	// 	}
 
-	// Try to list queues as a simple connectivity test
-	_, err = activemqClient.ListQueues()
-	if err != nil {
-		return fmt.Errorf("health check failed - cannot list queues: %w", err)
-	}
+	// 	// Try to list queues as a simple connectivity test
+	// 	_, err = activemqClient.ListQueues()
+	// 	if err != nil {
+	// 		return fmt.Errorf("health check failed - cannot list queues: %w", err)
+	// 	}
 
 	return nil
 }

@@ -19,10 +19,10 @@ type Manager interface {
 
 // Mount represents a volume mount
 type Mount struct {
-	Source      string // Host path or volume name
-	Target      string // Container path
-	Type        string // "bind" or "volume"
-	ReadOnly    bool
+	Source   string // Host path or volume name
+	Target   string // Container path
+	Type     string // "bind" or "volume"
+	ReadOnly bool
 }
 
 // Config holds container configuration

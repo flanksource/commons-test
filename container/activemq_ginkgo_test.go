@@ -17,7 +17,6 @@ var _ = Describe("ActiveMQ Container", func() {
 				container, err := NewActiveMQ("test-activemq", "admin", "admin123", false)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(container).ToNot(BeNil())
-				defer container.Close()
 
 				By("Verifying basic configuration")
 				config := container.Container.config
@@ -58,7 +57,6 @@ var _ = Describe("ActiveMQ Container", func() {
 				container, err := NewActiveMQ("test-activemq-defaults", "", "", true)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(container).ToNot(BeNil())
-				defer container.Close()
 
 				By("Verifying default credentials")
 				username, password := container.GetCredentials()
@@ -76,7 +74,6 @@ var _ = Describe("ActiveMQ Container", func() {
 			It("should handle method calls gracefully", func() {
 				container, err := NewActiveMQ("test-methods", "user", "pass", false)
 				Expect(err).ToNot(HaveOccurred())
-				defer container.Close()
 
 				By("Testing URL methods before starting")
 				Expect(container.GetBrokerURL()).To(BeEmpty())
@@ -102,7 +99,6 @@ var _ = Describe("ActiveMQ Container", func() {
 			It("should start successfully and provide access to services", func() {
 				container, err := NewActiveMQ("test-activemq-integration", "admin", "admin123", false)
 				Expect(err).ToNot(HaveOccurred())
-				defer container.Close()
 				defer container.Cleanup(context.Background())
 
 				By("Starting the container")
@@ -143,7 +139,6 @@ var _ = Describe("ActiveMQ Container", func() {
 			It("should fail before starting and pass after starting", func() {
 				container, err := NewActiveMQ("test-activemq-health", "admin", "admin123", false)
 				Expect(err).ToNot(HaveOccurred())
-				defer container.Close()
 				defer container.Cleanup(context.Background())
 
 				By("Testing health check before starting")
@@ -166,10 +161,6 @@ var _ = Describe("ActiveMQ Container", func() {
 				By("Testing health check after starting")
 				err = container.HealthCheck()
 				Expect(err).ToNot(HaveOccurred())
-
-				By("Verifying ActiveMQ client creation")
-				client := container.CreateClient()
-				Expect(client).ToNot(BeNil())
 			})
 		})
 
@@ -177,7 +168,6 @@ var _ = Describe("ActiveMQ Container", func() {
 			It("should provide access to all configured ports", func() {
 				container, err := NewActiveMQ("test-activemq-ports", "admin", "admin123", false)
 				Expect(err).ToNot(HaveOccurred())
-				defer container.Close()
 				defer container.Cleanup(context.Background())
 
 				By("Starting the container")

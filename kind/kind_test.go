@@ -1,8 +1,10 @@
-package test
+package kind
 
 import (
 	"os"
 	"testing"
+
+	"github.com/flanksource/commons-test/command"
 )
 
 func TestKindCluster(t *testing.T) {
@@ -49,7 +51,7 @@ func TestKindCluster(t *testing.T) {
 		kind := NewKind("test-cluster").NoColor()
 
 		// Skip if docker image doesn't exist
-		runner := NewCommandRunner(false)
+		runner := command.NewCommandRunner(false)
 		result := runner.RunCommandQuiet("docker", "images", "-q", "nginx:latest")
 		if result.Err != nil || result.Stdout == "" {
 			t.Skip("nginx:latest image not available")
@@ -97,7 +99,7 @@ func TestKindBuilderPattern(t *testing.T) {
 }
 
 func TestCommandRunner(t *testing.T) {
-	runner := NewCommandRunner(false)
+	runner := command.NewCommandRunner(false)
 
 	t.Run("RunCommand", func(t *testing.T) {
 		result := runner.RunCommand("echo", "hello")

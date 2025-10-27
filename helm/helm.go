@@ -1,4 +1,4 @@
-package test
+package helm
 
 import (
 	"bytes"
@@ -8,35 +8,39 @@ import (
 	"strings"
 	"time"
 
+	flanksourceCtx "github.com/flanksource/commons-db/context"
+	"github.com/flanksource/commons-test/command"
+
 	"sigs.k8s.io/yaml"
 )
 
 // HelmChart represents a Helm chart with fluent interface
 type HelmChart struct {
-	releaseName    string
-	namespace      string
-	chartPath      string
-	values         map[string]interface{}
-	wait           bool
-	timeout        time.Duration
-	passwordSecret string
-	colorOutput    bool
-	dryRun         bool
-	
+	flanksourceCtx.Context
+	releaseName string
+	namespace   string
+	chartPath   string
+	values      map[string]interface{}
+	wait        bool
+	timeout     time.Duration
+	colorOutput bool
+	dryRun      bool
+
 	// Command execution state
-	runner         *CommandRunner
-	lastResult     CommandResult
-	lastError      error
+	runner     *command.Runner
+	lastResult command.Result
+	lastError  error
 }
 
 // NewHelmChart creates a new HelmChart builder
-func NewHelmChart(chartPath string) *HelmChart {
+func NewHelmChart(ctx flanksourceCtx.Context, chartPath string) *HelmChart {
 	return &HelmChart{
+		Context:     ctx,
 		chartPath:   chartPath,
 		colorOutput: true,
 		timeout:     5 * time.Minute,
 		values:      make(map[string]interface{}),
-		runner:      NewCommandRunner(true),
+		runner:      command.NewCommandRunner(true),
 	}
 }
 
@@ -77,6 +81,14 @@ func (h *HelmChart) SetValue(key string, value interface{}) *HelmChart {
 	return h
 }
 
+func (h *HelmChart) GetValues() map[string]interface{} {
+	return h.values
+}
+
+func (h *HelmChart) GetValue(path ...string) string {
+	return h.Context.Lookup(h.namespace).WithHelmRef(h.releaseName, strings.Join(path, ".")).MustGetString()
+}
+
 // Wait enables waiting for resources to be ready
 func (h *HelmChart) Wait() *HelmChart {
 	h.wait = true
@@ -90,12 +102,6 @@ func (h *HelmChart) WaitFor(timeout time.Duration) *HelmChart {
 	return h
 }
 
-// WithPassword creates a password secret and uses it
-func (h *HelmChart) WithPassword(secretName string) *HelmChart {
-	h.passwordSecret = secretName
-	return h
-}
-
 // DryRun enables dry-run mode
 func (h *HelmChart) DryRun() *HelmChart {
 	h.dryRun = true
@@ -105,7 +111,7 @@ func (h *HelmChart) DryRun() *HelmChart {
 // NoColor disables colored output
 func (h *HelmChart) NoColor() *HelmChart {
 	h.colorOutput = false
-	h.runner = NewCommandRunner(false)
+	h.runner = command.NewCommandRunner(false)
 	return h
 }
 
@@ -114,16 +120,6 @@ func (h *HelmChart) Install() *HelmChart {
 	if h.releaseName == "" {
 		h.lastError = fmt.Errorf("release name is required")
 		return h
-	}
-
-	h.runner.Printf(colorYellow, colorBold, "=== Helm Install: %s ===", h.releaseName)
-
-	// Handle password secret if specified
-	if h.passwordSecret != "" {
-		if err := h.createPasswordSecret(); err != nil {
-			h.lastError = err
-			return h
-		}
 	}
 
 	args := []string{"install", h.releaseName, h.chartPath}
@@ -146,16 +142,6 @@ func (h *HelmChart) Upgrade() *HelmChart {
 	if h.releaseName == "" {
 		h.lastError = fmt.Errorf("release name is required")
 		return h
-	}
-
-	h.runner.Printf(colorYellow, colorBold, "=== Helm Upgrade: %s ===", h.releaseName)
-
-	// Handle password secret if specified
-	if h.passwordSecret != "" {
-		if err := h.createPasswordSecret(); err != nil {
-			h.lastError = err
-			return h
-		}
 	}
 
 	args := []string{"upgrade", h.releaseName, h.chartPath}
@@ -261,7 +247,7 @@ func (h *HelmChart) Error() error {
 }
 
 // Result returns the last command result
-func (h *HelmChart) Result() CommandResult {
+func (h *HelmChart) Result() command.Result {
 	return h.lastResult
 }
 
@@ -281,7 +267,7 @@ type Pod struct {
 	container   string
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  CommandResult
+	lastResult  command.Result
 	lastError   error
 }
 
@@ -398,7 +384,7 @@ type StatefulSet struct {
 	namespace   string
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  CommandResult
+	lastResult  command.Result
 	lastError   error
 }
 
@@ -461,7 +447,7 @@ type Secret struct {
 	namespace   string
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  CommandResult
+	lastResult  command.Result
 }
 
 // Get retrieves a secret value by key
@@ -490,7 +476,7 @@ type ConfigMap struct {
 	namespace   string
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  CommandResult
+	lastResult  command.Result
 }
 
 // Get retrieves a ConfigMap value by key
@@ -508,7 +494,7 @@ type PVC struct {
 	namespace   string
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  CommandResult
+	lastResult  command.Result
 }
 
 // Status returns the PVC status
@@ -564,85 +550,37 @@ func (h *HelmChart) appendCommonArgs(args []string) []string {
 	return args
 }
 
-func (h *HelmChart) createPasswordSecret() error {
-	password := fmt.Sprintf("pass-%d", time.Now().Unix())
-
-	h.runner.Printf(colorYellow, colorBold, "Creating password secret: %s", h.passwordSecret)
-
-	// Create the secret
-	result := h.runner.RunCommand("kubectl", "create", "secret", "generic", h.passwordSecret,
-		"--from-literal=password="+password,
-		"-n", h.namespace,
-		"--dry-run=client", "-o", "yaml")
-
-	if result.Err != nil {
-		return fmt.Errorf("failed to generate secret yaml: %s", result.String())
-	}
-
-	// Apply the secret
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(result.Stdout)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create secret: %w", err)
-	}
-
-	// Add the secret reference to values
-	if h.values == nil {
-		h.values = make(map[string]interface{})
-	}
-	h.values["database"] = map[string]interface{}{
-		"existingSecret": h.passwordSecret,
-		"secretKey":      "password",
-	}
-
-	h.runner.Printf(colorGray, "", "Secret created with password: %s", password)
-	return nil
-}
-
 func (h *HelmChart) collectDiagnostics() {
 	if !h.colorOutput {
 		return
 	}
 
-	h.runner.Printf(colorRed, colorBold, "=== Collecting Diagnostics ===")
-
-	// Get Helm release status
-	h.runner.Printf(colorBlue, "", "● Helm Release Status:")
 	h.runner.RunCommand("helm", "status", h.releaseName, "-n", h.namespace)
 
-	// Get pods
-	h.runner.Printf(colorBlue, "", "● Pods in namespace %s:", h.namespace)
 	h.runner.RunCommand("kubectl", "get", "pods", "-n", h.namespace, "-o", "wide")
 
-	// Get events
-	h.runner.Printf(colorBlue, "", "● Recent Events:")
 	h.runner.RunCommand("kubectl", "get", "events", "-n", h.namespace,
 		"--sort-by=.lastTimestamp")
-
-	h.runner.Printf(colorYellow, colorBold, "=== End of Diagnostics ===")
 }
 
-
-
-
 // Similar runCommand methods for Pod, StatefulSet, etc.
-func (p *Pod) runCommand(name string, args ...string) CommandResult {
+func (p *Pod) runCommand(name string, args ...string) command.Result {
 	return p.helm.runner.RunCommand(name, args...)
 }
 
-func (s *StatefulSet) runCommand(name string, args ...string) CommandResult {
+func (s *StatefulSet) runCommand(name string, args ...string) command.Result {
 	return s.helm.runner.RunCommand(name, args...)
 }
 
-func (sec *Secret) runCommand(name string, args ...string) CommandResult {
+func (sec *Secret) runCommand(name string, args ...string) command.Result {
 	return sec.helm.runner.RunCommand(name, args...)
 }
 
-func (c *ConfigMap) runCommand(name string, args ...string) CommandResult {
+func (c *ConfigMap) runCommand(name string, args ...string) command.Result {
 	return c.helm.runner.RunCommand(name, args...)
 }
 
-func (p *PVC) runCommand(name string, args ...string) CommandResult {
+func (p *PVC) runCommand(name string, args ...string) command.Result {
 	return p.helm.runner.RunCommand(name, args...)
 }
 
@@ -664,8 +602,8 @@ func (p *Pod) resolvePodName() error {
 type Namespace struct {
 	name        string
 	colorOutput bool
-	runner      *CommandRunner
-	lastResult  CommandResult
+	runner      *command.Runner
+	lastResult  command.Result
 	lastError   error
 }
 
@@ -674,7 +612,7 @@ func NewNamespace(name string) *Namespace {
 	return &Namespace{
 		name:        name,
 		colorOutput: true,
-		runner:      NewCommandRunner(true),
+		runner:      command.NewCommandRunner(true),
 	}
 }
 
@@ -709,6 +647,6 @@ func (n *Namespace) MustSucceed() *Namespace {
 	return n
 }
 
-func (n *Namespace) runCommand(name string, args ...string) CommandResult {
+func (n *Namespace) runCommand(name string, args ...string) command.Result {
 	return n.runner.RunCommand(name, args...)
 }

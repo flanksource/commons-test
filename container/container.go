@@ -1,46 +1,36 @@
 package container
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
+	"github.com/flanksource/clicky"
+	"github.com/flanksource/commons/logger"
 	. "github.com/onsi/ginkgo/v2"
 )
 
 const (
-	DefaultTimeout      = 5 * time.Minute
+	DefaultTimeout = 5 * time.Minute
 )
 
 // Container manages Docker containers with transparent reuse
 type Container struct {
+	logger.Logger
 	config      Config
-	client      *client.Client
 	containerID string
 	isRunning   bool
 }
 
 // New creates a new Container manager
 func New(config Config) (*Container, error) {
-	cli, err := client.NewClientWithOpts(
-		client.FromEnv,
-		client.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Docker client: %w", err)
-	}
-
 	return &Container{
+		Logger: logger.GetLogger(),
 		config: config,
-		client: cli,
 	}, nil
 }
 
@@ -67,11 +57,9 @@ func (c *Container) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	timeout := int(30) // 30 seconds
-	if err := c.client.ContainerStop(ctx, c.containerID, container.StopOptions{
-		Timeout: &timeout,
-	}); err != nil {
-		return fmt.Errorf("failed to stop container: %w", err)
+	process := clicky.Exec("docker", "stop", "-t", "30", c.containerID).Run()
+	if process.Err != nil {
+		return fmt.Errorf("failed to stop container: %w", process.Err)
 	}
 
 	c.isRunning = false
@@ -84,19 +72,20 @@ func (c *Container) Logs(ctx context.Context, follow bool) (io.ReadCloser, error
 		return nil, fmt.Errorf("container not started")
 	}
 
-	options := container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-		Follow:     follow,
-		Timestamps: true,
+	args := []string{"docker", "logs", "--timestamps"}
+	if follow {
+		args = append(args, "--follow")
+	}
+	args = append(args, c.containerID)
+
+	process := clicky.Exec(args[0], args[1:]...).Run()
+	if process.Err != nil {
+		return nil, fmt.Errorf("failed to get container logs: %w", process.Err)
 	}
 
-	logs, err := c.client.ContainerLogs(ctx, c.containerID, options)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get container logs: %w", err)
-	}
-
-	return logs, nil
+	// Combine stdout and stderr
+	output := process.Stdout.String() + process.Stderr.String()
+	return io.NopCloser(bytes.NewBufferString(output)), nil
 }
 
 // Exec executes a command in the container
@@ -105,42 +94,20 @@ func (c *Container) Exec(ctx context.Context, cmd []string) (string, error) {
 		return "", fmt.Errorf("container not started")
 	}
 
-	// Create exec instance
-	execConfig := container.ExecOptions{
-		AttachStdout: true,
-		AttachStderr: true,
-		Cmd:          cmd,
+	// Build docker exec command
+	args := []string{"docker", "exec", c.containerID}
+	args = append(args, cmd...)
+
+	process := clicky.Exec(args[0], args[1:]...).Run()
+
+	// Combine stdout and stderr for output
+	output := process.Stdout.String() + process.Stderr.String()
+
+	if process.Err != nil {
+		return output, fmt.Errorf("command failed: %w", process.Err)
 	}
 
-	execID, err := c.client.ContainerExecCreate(ctx, c.containerID, execConfig)
-	if err != nil {
-		return "", fmt.Errorf("failed to create exec instance: %w", err)
-	}
-
-	// Start exec
-	resp, err := c.client.ContainerExecAttach(ctx, execID.ID, container.ExecAttachOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to attach to exec instance: %w", err)
-	}
-	defer resp.Close()
-
-	// Read output
-	output, err := io.ReadAll(resp.Reader)
-	if err != nil {
-		return "", fmt.Errorf("failed to read exec output: %w", err)
-	}
-
-	// Check exec result
-	inspect, err := c.client.ContainerExecInspect(ctx, execID.ID)
-	if err != nil {
-		return "", fmt.Errorf("failed to inspect exec result: %w", err)
-	}
-
-	if inspect.ExitCode != 0 {
-		return string(output), fmt.Errorf("command failed with exit code %d: %s", inspect.ExitCode, string(output))
-	}
-
-	return string(output), nil
+	return output, nil
 }
 
 // IsRunning checks if the container is running
@@ -149,12 +116,13 @@ func (c *Container) IsRunning(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	inspect, err := c.client.ContainerInspect(ctx, c.containerID)
-	if err != nil {
-		return false, fmt.Errorf("failed to inspect container: %w", err)
+	process := clicky.Exec("docker", "inspect", "--format", "{{.State.Running}}", c.containerID).Run()
+	if process.Err != nil {
+		return false, fmt.Errorf("failed to inspect container: %w", process.Err)
 	}
 
-	c.isRunning = inspect.State.Running
+	running := strings.TrimSpace(process.Stdout.String()) == "true"
+	c.isRunning = running
 	return c.isRunning, nil
 }
 
@@ -164,17 +132,19 @@ func (c *Container) GetPort(port string) (string, error) {
 		return "", fmt.Errorf("container not started")
 	}
 
-	inspect, err := c.client.ContainerInspect(context.Background(), c.containerID)
-	if err != nil {
-		return "", fmt.Errorf("failed to inspect container: %w", err)
+	// Use docker inspect with format to get port mapping
+	format := fmt.Sprintf("{{(index (index .NetworkSettings.Ports \"%s/tcp\") 0).HostPort}}", port)
+	process := clicky.Exec("docker", "inspect", "--format", format, c.containerID).Run()
+	if process.Err != nil {
+		return "", fmt.Errorf("failed to inspect container: %w", process.Err)
 	}
 
-	portKey := port + "/tcp"
-	if portBindings, exists := inspect.NetworkSettings.Ports[nat.Port(portKey)]; exists && len(portBindings) > 0 {
-		return portBindings[0].HostPort, nil
+	hostPort := strings.TrimSpace(process.Stdout.String())
+	if hostPort == "" || hostPort == "<no value>" {
+		return "", fmt.Errorf("no port mapping found for port %s", port)
 	}
 
-	return "", fmt.Errorf("no port mapping found for port %s", port)
+	return hostPort, nil
 }
 
 // GetID returns the container ID
@@ -199,44 +169,37 @@ func (c *Container) Cleanup(ctx context.Context) error {
 	}
 
 	// Remove container
-	if err := c.client.ContainerRemove(ctx, c.containerID, container.RemoveOptions{
-		Force: true,
-	}); err != nil {
-		return fmt.Errorf("failed to remove container: %w", err)
+	process := clicky.Exec("docker", "rm", "-f", c.containerID).Run()
+	if process.Err != nil {
+		return fmt.Errorf("failed to remove container: %w", process.Err)
 	}
 
 	c.containerID = ""
 	return nil
 }
 
-// Close closes the Docker client
-func (c *Container) Close() error {
-	if c.client != nil {
-		return c.client.Close()
-	}
-	return nil
-}
-
 // findAndReuseContainer tries to find and reuse an existing container
 func (c *Container) findAndReuseContainer(ctx context.Context) error {
-	containers, err := c.client.ContainerList(ctx, container.ListOptions{All: true})
-	if err != nil {
-		return fmt.Errorf("failed to list containers: %w", err)
+	// Use docker ps to list containers with matching name
+	process := clicky.Exec("docker", "ps", "-a", "--filter", fmt.Sprintf("name=^%s$", c.config.Name), "--format", "{{.ID}}\t{{.Status}}").Run()
+	if process.Err != nil {
+		return fmt.Errorf("failed to list containers: %w", process.Err)
 	}
 
-	// Look for container by name
-	for _, ctr := range containers {
-		for _, name := range ctr.Names {
-			cleanName := strings.TrimPrefix(name, "/")
-			if cleanName == c.config.Name {
-				c.containerID = ctr.ID
-				c.isRunning = strings.Contains(ctr.Status, "Up")
-				return nil
-			}
-		}
+	output := strings.TrimSpace(process.Stdout.String())
+	if output == "" {
+		return fmt.Errorf("container with name %s not found", c.config.Name)
 	}
 
-	return fmt.Errorf("container with name %s not found", c.config.Name)
+	// Parse output: ID<tab>Status
+	parts := strings.Split(output, "\t")
+	if len(parts) < 2 {
+		return fmt.Errorf("unexpected output format from docker ps")
+	}
+
+	c.containerID = parts[0]
+	c.isRunning = strings.HasPrefix(parts[1], "Up")
+	return nil
 }
 
 // ensureContainerRunning starts the container if it's not running
@@ -245,8 +208,9 @@ func (c *Container) ensureContainerRunning(ctx context.Context) error {
 		return nil
 	}
 
-	if err := c.client.ContainerStart(ctx, c.containerID, container.StartOptions{}); err != nil {
-		return fmt.Errorf("failed to start existing container: %w", err)
+	process := clicky.Exec("docker", "start", c.containerID).Run()
+	if process.Err != nil {
+		return fmt.Errorf("failed to start existing container: %w", process.Err)
 	}
 
 	c.isRunning = true
@@ -255,77 +219,66 @@ func (c *Container) ensureContainerRunning(ctx context.Context) error {
 
 // createAndStartContainer creates and starts a new container
 func (c *Container) createAndStartContainer(ctx context.Context) error {
-	// Pull image if needed
-	if _, _, err := c.client.ImageInspectWithRaw(ctx, c.config.Image); err != nil {
+	// Check if image exists, pull if needed
+	checkProcess := clicky.Exec("docker", "image", "inspect", c.config.Image).Run()
+	if checkProcess.Err != nil {
 		c.Infof("Pulling image %s...", c.config.Image)
-		_, err := c.client.ImagePull(ctx, c.config.Image, image.PullOptions{})
-		if err != nil {
-			c.Errorf("Failed to pull image: %v", err)
-			return fmt.Errorf("failed to pull image: %w", err)
+		pullProcess := clicky.Exec("docker", "pull", c.config.Image).Run()
+		if pullProcess.Err != nil {
+			c.Errorf("Failed to pull image: %v", pullProcess.Err)
+			return fmt.Errorf("failed to pull image: %w", pullProcess.Err)
 		}
 		c.Infof("Successfully pulled image %s", c.config.Image)
 	}
 
-	// Prepare port bindings
-	portBindings := nat.PortMap{}
-	exposedPorts := nat.PortSet{}
+	// Build docker create command
+	args := []string{"docker", "create"}
+
+	// Add name if specified
+	if c.config.Name != "" {
+		args = append(args, "--name", c.config.Name)
+	}
+
+	// Add port bindings
 	for containerPort, hostPort := range c.config.Ports {
-		port := nat.Port(containerPort + "/tcp")
-		exposedPorts[port] = struct{}{}
-		portBindings[port] = []nat.PortBinding{
-			{
-				HostPort: hostPort,
-			},
+		args = append(args, "-p", fmt.Sprintf("%s:%s", hostPort, containerPort))
+	}
+
+	// Add environment variables
+	for _, env := range c.config.Env {
+		args = append(args, "-e", env)
+	}
+
+	// Add mounts
+	for _, m := range c.config.Mounts {
+		mountStr := fmt.Sprintf("%s:%s", m.Source, m.Target)
+		if m.ReadOnly {
+			mountStr += ":ro"
+		}
+		if m.Type == "volume" {
+			args = append(args, "-v", mountStr)
+		} else {
+			args = append(args, "--mount", fmt.Sprintf("type=bind,source=%s,target=%s", m.Source, m.Target))
 		}
 	}
+
+	// Add image
+	args = append(args, c.config.Image)
 
 	// Create container
-	containerConfig := &container.Config{
-		Image:        c.config.Image,
-		Env:          c.config.Env,
-		ExposedPorts: exposedPorts,
+	createProcess := clicky.Exec(args[0], args[1:]...).Run()
+	if createProcess.Err != nil {
+		return fmt.Errorf("failed to create container: %w", createProcess.Err)
 	}
 
-	// Prepare mounts
-	var mounts []mount.Mount
-	for _, m := range c.config.Mounts {
-		mountType := mount.TypeBind
-		if m.Type == "volume" {
-			mountType = mount.TypeVolume
-		}
-		mounts = append(mounts, mount.Mount{
-			Type:     mountType,
-			Source:   m.Source,
-			Target:   m.Target,
-			ReadOnly: m.ReadOnly,
-		})
-	}
-
-	hostConfig := &container.HostConfig{
-		PortBindings: portBindings,
-		Mounts:       mounts,
-		AutoRemove:   false, // Never auto-remove to prevent immediate deletion on exit
-	}
-
-	networkConfig := &network.NetworkingConfig{}
-
-	var containerName string
-	if c.config.Name != "" {
-		containerName = c.config.Name
-	}
-
-	resp, err := c.client.ContainerCreate(ctx, containerConfig, hostConfig, networkConfig, nil, containerName)
-	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
-	}
-
-	c.containerID = resp.ID
+	c.containerID = strings.TrimSpace(createProcess.Stdout.String())
 
 	// Start container
 	c.Infof("Starting container...")
-	if err := c.client.ContainerStart(ctx, c.containerID, container.StartOptions{}); err != nil {
-		c.PrintLogsOnFailure(ctx, fmt.Sprintf("Failed to start container: %v", err))
-		return fmt.Errorf("failed to start container: %w", err)
+	startProcess := clicky.Exec("docker", "start", c.containerID).Run()
+	if startProcess.Err != nil {
+		c.PrintLogsOnFailure(ctx, fmt.Sprintf("Failed to start container: %v", startProcess.Err))
+		return fmt.Errorf("failed to start container: %w", startProcess.Err)
 	}
 
 	c.Infof("Container started, verifying it remains running...")
@@ -361,13 +314,23 @@ func (c *Container) PrintLogsOnFailure(ctx context.Context, reason string) {
 	}
 
 	// Try to get container status first
-	if inspect, err := c.client.ContainerInspect(ctx, c.containerID); err == nil {
-		c.Errorf("Container Status - State: %s, ExitCode: %d, Error: %s",
-			inspect.State.Status, inspect.State.ExitCode, inspect.State.Error)
-		c.Errorf("Container Started At: %s, Finished At: %s",
-			inspect.State.StartedAt, inspect.State.FinishedAt)
+	process := clicky.Exec("docker", "inspect", "--format", "{{json .State}}", c.containerID).Run()
+	if process.Err == nil {
+		var state struct {
+			Status     string `json:"Status"`
+			ExitCode   int    `json:"ExitCode"`
+			Error      string `json:"Error"`
+			StartedAt  string `json:"StartedAt"`
+			FinishedAt string `json:"FinishedAt"`
+		}
+		if err := json.Unmarshal([]byte(process.Stdout.String()), &state); err == nil {
+			c.Errorf("Container Status - State: %s, ExitCode: %d, Error: %s",
+				state.Status, state.ExitCode, state.Error)
+			c.Errorf("Container Started At: %s, Finished At: %s",
+				state.StartedAt, state.FinishedAt)
+		}
 	} else {
-		c.Errorf("Failed to inspect container for status: %v", err)
+		c.Errorf("Failed to inspect container for status: %v", process.Err)
 	}
 
 	// Get container logs
@@ -412,20 +375,30 @@ func (c *Container) waitForStableState(ctx context.Context) error {
 		default:
 		}
 
-		// Check container state
-		inspect, err := c.client.ContainerInspect(ctx, c.containerID)
-		if err != nil {
-			c.Errorf("Failed to inspect container during stability check: %v", err)
-			c.PrintLogsOnFailure(ctx, fmt.Sprintf("Failed to inspect container: %v", err))
-			return fmt.Errorf("failed to inspect container: %w", err)
+		// Check container state using docker inspect
+		process := clicky.Exec("docker", "inspect", "--format", "{{json .State}}", c.containerID).Run()
+		if process.Err != nil {
+			c.Errorf("Failed to inspect container during stability check: %v", process.Err)
+			c.PrintLogsOnFailure(ctx, fmt.Sprintf("Failed to inspect container: %v", process.Err))
+			return fmt.Errorf("failed to inspect container: %w", process.Err)
 		}
 
-		if !inspect.State.Running {
+		// Parse the state JSON
+		var state struct {
+			Running  bool   `json:"Running"`
+			Status   string `json:"Status"`
+			ExitCode int    `json:"ExitCode"`
+		}
+		if err := json.Unmarshal([]byte(process.Stdout.String()), &state); err != nil {
+			return fmt.Errorf("failed to parse container state: %w", err)
+		}
+
+		if !state.Running {
 			failureReason := fmt.Sprintf("Container exited unexpectedly - Status: %s, ExitCode: %d",
-				inspect.State.Status, inspect.State.ExitCode)
+				state.Status, state.ExitCode)
 			c.PrintLogsOnFailure(ctx, failureReason)
 			return fmt.Errorf("container exited with status %s (exit code: %d)",
-				inspect.State.Status, inspect.State.ExitCode)
+				state.Status, state.ExitCode)
 		}
 
 		// Container is running, wait before next check
