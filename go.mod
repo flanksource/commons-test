@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	github.com/bsm/gomega v1.27.10
-	github.com/flanksource/clicky v1.9.0
+	github.com/flanksource/clicky v1.10.0
 	github.com/flanksource/commons v1.42.3
 	github.com/flanksource/commons-db v0.1.0
 	github.com/hexops/gotextdiff v1.0.3
