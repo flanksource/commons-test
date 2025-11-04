@@ -7,6 +7,7 @@ require (
 	github.com/flanksource/clicky v1.11.0
 	github.com/flanksource/commons v1.42.3
 	github.com/flanksource/commons-db v0.1.0
+	github.com/flanksource/gomplate/v3 v3.24.60
 	github.com/hexops/gotextdiff v1.0.3
 	github.com/microsoft/go-mssqldb v1.9.3
 	github.com/onsi/ginkgo/v2 v2.26.0
@@ -47,7 +48,6 @@ require (
 	github.com/emirpasic/gods/v2 v2.0.0-alpha // indirect
 	github.com/f-amaral/go-async v0.3.0 // indirect
 	github.com/fatih/color v1.18.0 // indirect
-	github.com/flanksource/gomplate/v3 v3.24.60 // indirect
 	github.com/flanksource/is-healthy v1.0.79 // indirect
 	github.com/flanksource/kubectl-neat v1.0.4 // indirect
 	github.com/flanksource/maroto/v2 v2.4.2 // indirect
