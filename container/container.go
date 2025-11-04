@@ -83,9 +83,7 @@ func (c *Container) Logs(ctx context.Context, follow bool) (io.ReadCloser, error
 		return nil, fmt.Errorf("failed to get container logs: %w", process.Err)
 	}
 
-	// Combine stdout and stderr
-	output := process.Stdout.String() + process.Stderr.String()
-	return io.NopCloser(bytes.NewBufferString(output)), nil
+	return io.NopCloser(bytes.NewBufferString(process.Out())), nil
 }
 
 // Exec executes a command in the container
@@ -100,14 +98,11 @@ func (c *Container) Exec(ctx context.Context, cmd []string) (string, error) {
 
 	process := clicky.Exec(args[0], args[1:]...).Run()
 
-	// Combine stdout and stderr for output
-	output := process.Stdout.String() + process.Stderr.String()
-
 	if process.Err != nil {
-		return output, fmt.Errorf("command failed: %w", process.Err)
+		return "", fmt.Errorf("command failed: %w", process.Err)
 	}
 
-	return output, nil
+	return process.Out(), nil
 }
 
 // IsRunning checks if the container is running
@@ -121,7 +116,7 @@ func (c *Container) IsRunning(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("failed to inspect container: %w", process.Err)
 	}
 
-	running := strings.TrimSpace(process.Stdout.String()) == "true"
+	running := strings.TrimSpace(process.GetStdout()) == "true"
 	c.isRunning = running
 	return c.isRunning, nil
 }
@@ -139,7 +134,7 @@ func (c *Container) GetPort(port string) (string, error) {
 		return "", fmt.Errorf("failed to inspect container: %w", process.Err)
 	}
 
-	hostPort := strings.TrimSpace(process.Stdout.String())
+	hostPort := strings.TrimSpace(process.GetStdout())
 	if hostPort == "" || hostPort == "<no value>" {
 		return "", fmt.Errorf("no port mapping found for port %s", port)
 	}
@@ -186,7 +181,7 @@ func (c *Container) findAndReuseContainer(ctx context.Context) error {
 		return fmt.Errorf("failed to list containers: %w", process.Err)
 	}
 
-	output := strings.TrimSpace(process.Stdout.String())
+	output := strings.TrimSpace(process.GetStdout())
 	if output == "" {
 		return fmt.Errorf("container with name %s not found", c.config.Name)
 	}
@@ -271,7 +266,7 @@ func (c *Container) createAndStartContainer(ctx context.Context) error {
 		return fmt.Errorf("failed to create container: %w", createProcess.Err)
 	}
 
-	c.containerID = strings.TrimSpace(createProcess.Stdout.String())
+	c.containerID = strings.TrimSpace(createProcess.GetStdout())
 
 	// Start container
 	c.Infof("Starting container...")
@@ -323,7 +318,7 @@ func (c *Container) PrintLogsOnFailure(ctx context.Context, reason string) {
 			StartedAt  string `json:"StartedAt"`
 			FinishedAt string `json:"FinishedAt"`
 		}
-		if err := json.Unmarshal([]byte(process.Stdout.String()), &state); err == nil {
+		if err := json.Unmarshal([]byte(process.GetStdout()), &state); err == nil {
 			c.Errorf("Container Status - State: %s, ExitCode: %d, Error: %s",
 				state.Status, state.ExitCode, state.Error)
 			c.Errorf("Container Started At: %s, Finished At: %s",
@@ -389,7 +384,7 @@ func (c *Container) waitForStableState(ctx context.Context) error {
 			Status   string `json:"Status"`
 			ExitCode int    `json:"ExitCode"`
 		}
-		if err := json.Unmarshal([]byte(process.Stdout.String()), &state); err != nil {
+		if err := json.Unmarshal([]byte(process.GetStdout()), &state); err != nil {
 			return fmt.Errorf("failed to parse container state: %w", err)
 		}
 

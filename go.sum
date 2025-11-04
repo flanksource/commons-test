@@ -90,8 +90,8 @@ github.com/f-amaral/go-async v0.3.0 h1:h4kLsX7aKfdWaHvV0lf+/EE3OIeCzyeDYJDb/vDZU
 github.com/f-amaral/go-async v0.3.0/go.mod h1:Hz5Qr6DAWpbTTUjytnrg1WIsDgS7NtOei5y8SipYS7U=
 github.com/fatih/color v1.18.0 h1:S8gINlzdQ840/4pfAwic/ZE0djQEH3wM94VfqLTZcOM=
 github.com/fatih/color v1.18.0/go.mod h1:4FelSpRwEGDpQ12mAdzqdOukCy4u8WUtOY6lkT/6HfU=
-github.com/flanksource/clicky v1.9.0 h1:rMFJj1OHvxDswcSMr+XS8Qm3en7021eNJ3XtqGHtYq0=
-github.com/flanksource/clicky v1.9.0/go.mod h1:x1AfaTaIVpztFpByXlv3KNy2S/ua9T6xBSA56HhIgpM=
+github.com/flanksource/clicky v1.11.0 h1:b/gdDOuoAel5MUNMPzw0ZFgsNxPLy1hHOtrW1TeFsa8=
+github.com/flanksource/clicky v1.11.0/go.mod h1:Rfma4dthSRBI30HTRYYS7B6XLL5Me8saLe5lmx220z8=
 github.com/flanksource/commons v1.42.3 h1:53tr1A8fFywYD/56kZgYNAxUEqOdvbXAiQr+3/M2Zso=
 github.com/flanksource/commons v1.42.3/go.mod h1:xEBCobwaM0+EHn2SvFpqiCBJCVk1803An1kZleXFR9Y=
 github.com/flanksource/commons-db v0.1.0 h1:R/sR9aAT5qxD+q9hd+cGjFmvi6SNTF+R94HosvX/7YU=

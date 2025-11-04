@@ -5,14 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/flanksource/clicky"
+	clickyExec "github.com/flanksource/clicky/exec"
 	flanksourceCtx "github.com/flanksource/commons-db/context"
 	"github.com/flanksource/commons-test/command"
-
+	"github.com/flanksource/gomplate/v3/base64"
 	"sigs.k8s.io/yaml"
 )
+
+type Helm = clickyExec.WrapperFunc
+
+var kubectl clickyExec.WrapperFunc = clicky.Exec("kubectl").AsWrapper()
+var helm clickyExec.WrapperFunc = clicky.Exec("helm").AsWrapper()
 
 // HelmChart represents a Helm chart with fluent interface
 type HelmChart struct {
@@ -25,10 +33,9 @@ type HelmChart struct {
 	timeout     time.Duration
 	colorOutput bool
 	dryRun      bool
+	helm        Helm
 
-	// Command execution state
-	runner     *command.Runner
-	lastResult command.Result
+	lastResult *clickyExec.ExecResult
 	lastError  error
 }
 
@@ -40,7 +47,6 @@ func NewHelmChart(ctx flanksourceCtx.Context, chartPath string) *HelmChart {
 		colorOutput: true,
 		timeout:     5 * time.Minute,
 		values:      make(map[string]interface{}),
-		runner:      command.NewCommandRunner(true),
 	}
 }
 
@@ -111,7 +117,6 @@ func (h *HelmChart) DryRun() *HelmChart {
 // NoColor disables colored output
 func (h *HelmChart) NoColor() *HelmChart {
 	h.colorOutput = false
-	h.runner = command.NewCommandRunner(false)
 	return h
 }
 
@@ -122,16 +127,9 @@ func (h *HelmChart) Install() *HelmChart {
 		return h
 	}
 
-	args := []string{"install", h.releaseName, h.chartPath}
-	args = h.appendCommonArgs(args)
-
-	if h.dryRun {
-		args = append(args, "--dry-run")
-	}
-
-	h.lastResult = h.runner.RunCommand("helm", args...)
-	if h.lastResult.Err != nil {
-		h.lastError = fmt.Errorf("helm install failed: %s", h.lastResult.String())
+	h.helm = h.command()
+	h.lastResult, h.lastError = h.helm("install", h.releaseName, h.chartPath, "--create-namespace")
+	if h.lastError != nil {
 		h.collectDiagnostics()
 	}
 	return h
@@ -143,17 +141,10 @@ func (h *HelmChart) Upgrade() *HelmChart {
 		h.lastError = fmt.Errorf("release name is required")
 		return h
 	}
+	h.helm = h.command()
 
-	args := []string{"upgrade", h.releaseName, h.chartPath}
-	args = h.appendCommonArgs(args)
-
-	if h.dryRun {
-		args = append(args, "--dry-run")
-	}
-
-	h.lastResult = h.runner.RunCommand("helm", args...)
-	if h.lastResult.Err != nil {
-		h.lastError = fmt.Errorf("helm upgrade failed: %s", h.lastResult.String())
+	h.lastResult, h.lastError = h.helm("upgrade", h.releaseName, h.chartPath)
+	if h.lastError != nil {
 		h.collectDiagnostics()
 	}
 	return h
@@ -166,25 +157,16 @@ func (h *HelmChart) Delete() *HelmChart {
 		return h
 	}
 
-	args := []string{"delete", h.releaseName}
-	if h.namespace != "" {
-		args = append(args, "--namespace", h.namespace)
-	}
-	if h.wait {
-		args = append(args, "--wait")
-	}
-
-	h.lastResult = h.runner.RunCommand("helm", args...)
-	if h.lastResult.Err != nil && !strings.Contains(h.lastResult.Stderr, "not found") {
-		h.lastError = fmt.Errorf("helm delete failed: %s", h.lastResult.String())
-	}
+	h.lastResult, h.lastError = helm("delete", "--namespace", h.namespace, h.releaseName, "--wait=false")
 	return h
 }
 
 // GetPod returns a Pod accessor for the current release
 func (h *HelmChart) GetPod(selector string) *Pod {
 	return &Pod{
-		namespace:   h.namespace,
+		Metadata: Metadata{
+			Namespace: h.namespace,
+		},
 		selector:    selector,
 		helm:        h,
 		colorOutput: h.colorOutput,
@@ -224,8 +206,10 @@ func (h *HelmChart) GetConfigMap(name string) *ConfigMap {
 // GetPVC returns a PersistentVolumeClaim accessor
 func (h *HelmChart) GetPVC(name string) *PVC {
 	return &PVC{
-		name:        name,
-		namespace:   h.namespace,
+		Metadata: Metadata{
+			Name:      name,
+			Namespace: h.namespace,
+		},
 		helm:        h,
 		colorOutput: h.colorOutput,
 	}
@@ -233,12 +217,8 @@ func (h *HelmChart) GetPVC(name string) *PVC {
 
 // Status returns the Helm release status
 func (h *HelmChart) Status() (string, error) {
-	args := []string{"status", h.releaseName}
-	if h.namespace != "" {
-		args = append(args, "-n", h.namespace)
-	}
-	result := h.runner.RunCommand("helm", args...)
-	return result.Stdout, result.Err
+	result, err := helm("status", h.releaseName, "--namespace", h.namespace)
+	return result.Stdout, err
 }
 
 // Error returns the last error
@@ -247,7 +227,7 @@ func (h *HelmChart) Error() error {
 }
 
 // Result returns the last command result
-func (h *HelmChart) Result() command.Result {
+func (h *HelmChart) Result() *clickyExec.ExecResult {
 	return h.lastResult
 }
 
@@ -259,123 +239,14 @@ func (h *HelmChart) MustSucceed() *HelmChart {
 	return h
 }
 
-// Pod represents a Kubernetes pod with fluent interface
-type Pod struct {
-	namespace   string
-	selector    string
-	name        string
-	container   string
-	helm        *HelmChart
-	colorOutput bool
-	lastResult  command.Result
-	lastError   error
-}
-
-// Container sets the container name
-func (p *Pod) Container(name string) *Pod {
-	p.container = name
-	return p
-}
-
-// WaitReady waits for the pod to be ready
-func (p *Pod) WaitReady() *Pod {
-	return p.WaitFor("condition=Ready", 2*time.Minute)
-}
-
-// WaitFor waits for a specific condition
-func (p *Pod) WaitFor(condition string, timeout time.Duration) *Pod {
-	args := []string{"wait", "pod"}
-	if p.namespace != "" {
-		args = append(args, "-n", p.namespace)
+func (h *HelmChart) Matches(o Object) bool {
+	if release, ok := o.Annotations["meta.helm.sh/release-name"]; !ok || release != h.releaseName {
+		return false
 	}
-	if p.selector != "" {
-		args = append(args, "-l", p.selector)
+	if namespace, ok := o.Annotations["meta.helm.sh/release-namespace"]; !ok || namespace != h.namespace {
+		return false
 	}
-	args = append(args, "--for="+condition, "--timeout="+timeout.String())
-
-	p.lastResult = p.runCommand("kubectl", args...)
-	if p.lastResult.Err != nil {
-		p.lastError = fmt.Errorf("wait failed: %s", p.lastResult.String())
-	}
-	return p
-}
-
-// Exec executes a command in the pod
-func (p *Pod) Exec(command string) *Pod {
-	// Get pod name if not set
-	if p.name == "" && p.selector != "" {
-		if err := p.resolvePodName(); err != nil {
-			p.lastError = err
-			return p
-		}
-	}
-
-	args := []string{"exec", "-n", p.namespace, p.name}
-	if p.container != "" {
-		args = append(args, "-c", p.container)
-	}
-	args = append(args, "--", "bash", "-c", command)
-
-	p.lastResult = p.runCommand("kubectl", args...)
-	if p.lastResult.Err != nil {
-		p.lastError = fmt.Errorf("exec failed: %s", p.lastResult.String())
-	}
-	return p
-}
-
-// GetLogs retrieves pod logs
-func (p *Pod) GetLogs(lines ...int) string {
-	// Get pod name if not set
-	if p.name == "" && p.selector != "" {
-		if err := p.resolvePodName(); err != nil {
-			p.lastError = err
-			return ""
-		}
-	}
-
-	args := []string{"logs", "-n", p.namespace, p.name}
-	if p.container != "" {
-		args = append(args, "-c", p.container)
-	}
-	if len(lines) > 0 {
-		args = append(args, "--tail", fmt.Sprintf("%d", lines[0]))
-	}
-
-	p.lastResult = p.runCommand("kubectl", args...)
-	return p.lastResult.Stdout
-}
-
-// Status returns the pod status
-func (p *Pod) Status() (string, error) {
-	// Get pod name if not set
-	if p.name == "" && p.selector != "" {
-		if err := p.resolvePodName(); err != nil {
-			return "", err
-		}
-	}
-
-	args := []string{"get", "pod", p.name, "-n", p.namespace,
-		"-o", "jsonpath={.status.phase}"}
-	p.lastResult = p.runCommand("kubectl", args...)
-	return strings.TrimSpace(p.lastResult.Stdout), p.lastResult.Err
-}
-
-// Result returns the last command result
-func (p *Pod) Result() string {
-	return p.lastResult.Stdout
-}
-
-// Error returns the last error
-func (p *Pod) Error() error {
-	return p.lastError
-}
-
-// MustSucceed panics if there was an error
-func (p *Pod) MustSucceed() *Pod {
-	if p.lastError != nil {
-		panic(p.lastError)
-	}
-	return p
+	return true
 }
 
 // StatefulSet represents a Kubernetes StatefulSet
@@ -384,7 +255,7 @@ type StatefulSet struct {
 	namespace   string
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  command.Result
+	lastResult  *clickyExec.ExecResult
 	lastError   error
 }
 
@@ -395,50 +266,42 @@ func (s *StatefulSet) WaitReady() *StatefulSet {
 
 // WaitFor waits for the StatefulSet rollout to complete
 func (s *StatefulSet) WaitFor(timeout time.Duration) *StatefulSet {
-	args := []string{"rollout", "status", "statefulset", s.name,
+	args := []any{"rollout", "status", "statefulset", s.name,
 		"-n", s.namespace, "--timeout=" + timeout.String()}
 
-	s.lastResult = s.runCommand("kubectl", args...)
-	if s.lastResult.Err != nil {
-		s.lastError = fmt.Errorf("rollout wait failed: %s", s.lastResult.String())
-	}
+	s.lastResult, s.lastError = kubectl(args...)
 	return s
 }
 
 // GetReplicas returns the number of ready replicas
 func (s *StatefulSet) GetReplicas() (int, error) {
-	args := []string{"get", "statefulset", s.name, "-n", s.namespace,
+	args := []any{"get", "statefulset", s.name, "-n", s.namespace,
 		"-o", "jsonpath={.status.readyReplicas}"}
-	s.lastResult = s.runCommand("kubectl", args...)
-	if s.lastResult.Err != nil {
-		return 0, s.lastResult.Err
+	p, err := kubectl(args...)
+	if err != nil {
+		return 0, err
 	}
 
-	if s.lastResult.Stdout == "" {
-		return 0, nil
+	i, err := strconv.Atoi(p.Stdout)
+	if err != nil {
+		return 0, err
 	}
-
-	var replicas int
-	if _, err := fmt.Sscanf(s.lastResult.Stdout, "%d", &replicas); err != nil {
-		return 0, fmt.Errorf("failed to parse replicas: %w", err)
-	}
-	return replicas, nil
+	return i, nil
 }
 
 // GetGeneration returns the current generation
 func (s *StatefulSet) GetGeneration() (int64, error) {
-	args := []string{"get", "statefulset", s.name, "-n", s.namespace,
+	args := []any{"get", "statefulset", s.name, "-n", s.namespace,
 		"-o", "jsonpath={.metadata.generation}"}
-	s.lastResult = s.runCommand("kubectl", args...)
-	if s.lastResult.Err != nil {
-		return 0, s.lastResult.Err
+	p, err := kubectl(args...)
+	if err != nil {
+		return 0, err
 	}
-
-	var gen int64
-	if _, err := fmt.Sscanf(strings.TrimSpace(s.lastResult.Stdout), "%d", &gen); err != nil {
-		return 0, fmt.Errorf("failed to parse generation: %w", err)
+	i, err := strconv.Atoi(p.Stdout)
+	if err != nil {
+		return 0, err
 	}
-	return gen, nil
+	return int64(i), nil
 }
 
 // Secret represents a Kubernetes Secret
@@ -452,20 +315,13 @@ type Secret struct {
 
 // Get retrieves a secret value by key
 func (s *Secret) Get(key string) (string, error) {
-	args := []string{"get", "secret", s.name, "-n", s.namespace,
+	args := []any{"get", "secret", s.name, "-n", s.namespace,
 		"-o", fmt.Sprintf("jsonpath={.data.%s}", key)}
-	s.lastResult = s.runCommand("kubectl", args...)
-	if s.lastResult.Err != nil {
-		return "", s.lastResult.Err
-	}
-
-	// Decode base64
-	cmd := exec.Command("base64", "-d")
-	cmd.Stdin = strings.NewReader(s.lastResult.Stdout)
-	decoded, err := cmd.Output()
+	p, err := kubectl(args...)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode base64: %w", err)
+		return "", err
 	}
+	decoded, _ := base64.Decode(p.Stdout)
 
 	return string(decoded), nil
 }
@@ -476,33 +332,31 @@ type ConfigMap struct {
 	namespace   string
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  command.Result
+	lastResult  *clickyExec.ExecResult
 }
 
 // Get retrieves a ConfigMap value by key
 func (c *ConfigMap) Get(key string) (string, error) {
 	escapedKey := strings.ReplaceAll(key, ".", "\\.")
-	args := []string{"get", "configmap", c.name, "-n", c.namespace,
+	args := []any{"get", "configmap", c.name, "-n", c.namespace,
 		"-o", fmt.Sprintf("jsonpath={.data['%s']}", escapedKey)}
-	c.lastResult = c.runCommand("kubectl", args...)
-	return c.lastResult.Stdout, c.lastResult.Err
+	p, err := kubectl(args...)
+	return p.Stdout, err
 }
 
 // PVC represents a PersistentVolumeClaim
 type PVC struct {
-	name        string
-	namespace   string
+	Metadata    `json:",inline"`
 	helm        *HelmChart
 	colorOutput bool
-	lastResult  command.Result
+	lastResult  *clickyExec.ExecResult
 }
 
 // Status returns the PVC status
 func (p *PVC) Status() (map[string]interface{}, error) {
-	args := []string{"get", "pvc", p.name, "-n", p.namespace, "-o", "json"}
-	p.lastResult = p.runCommand("kubectl", args...)
-	if p.lastResult.Err != nil {
-		return nil, p.lastResult.Err
+	p.lastResult, _ = kubectl("get", "pvc", p.Name, "-n", p.Namespace, "-o", "json")
+	if !p.lastResult.IsOk() {
+		return nil, p.lastResult.Error
 	}
 
 	var pvc map[string]interface{}
@@ -515,7 +369,8 @@ func (p *PVC) Status() (map[string]interface{}, error) {
 
 // Helper methods
 
-func (h *HelmChart) appendCommonArgs(args []string) []string {
+func (h *HelmChart) command(args ...string) Helm {
+
 	if h.namespace != "" {
 		args = append(args, "--namespace", h.namespace)
 	}
@@ -526,12 +381,16 @@ func (h *HelmChart) appendCommonArgs(args []string) []string {
 		args = append(args, "--timeout", h.timeout.String())
 	}
 
+	if h.dryRun {
+		args = append(args, "--dry-run")
+	}
+
 	// Add values if any
 	if len(h.values) > 0 {
 		valuesYaml, err := yaml.Marshal(h.values)
 		if err != nil {
 			h.lastError = fmt.Errorf("failed to marshal values: %w", err)
-			return args
+			return nil
 		}
 
 		// Write values to temp file
@@ -540,14 +399,16 @@ func (h *HelmChart) appendCommonArgs(args []string) []string {
 		cmd.Stdin = bytes.NewReader(valuesYaml)
 		if err := cmd.Run(); err != nil {
 			h.lastError = fmt.Errorf("failed to write values file: %w", err)
-			return args
+			return nil
 		}
 
 		args = append(args, "--values", tempFile)
 		// Note: In production, should defer cleanup of temp file
 	}
 
-	return args
+	cmd := clicky.Exec("helm", args...)
+
+	return cmd.AsWrapper()
 }
 
 func (h *HelmChart) collectDiagnostics() {
@@ -555,98 +416,10 @@ func (h *HelmChart) collectDiagnostics() {
 		return
 	}
 
-	h.runner.RunCommand("helm", "status", h.releaseName, "-n", h.namespace)
+	helm(clickyExec.WithDebug(), "status", h.releaseName, "-n", h.namespace)
 
-	h.runner.RunCommand("kubectl", "get", "pods", "-n", h.namespace, "-o", "wide")
+	kubectl(clickyExec.WithDebug(), "get", "pods", "-n", h.namespace, "-o", "wide")
 
-	h.runner.RunCommand("kubectl", "get", "events", "-n", h.namespace,
+	kubectl(clickyExec.WithDebug(), "get", "events", "-n", h.namespace,
 		"--sort-by=.lastTimestamp")
-}
-
-// Similar runCommand methods for Pod, StatefulSet, etc.
-func (p *Pod) runCommand(name string, args ...string) command.Result {
-	return p.helm.runner.RunCommand(name, args...)
-}
-
-func (s *StatefulSet) runCommand(name string, args ...string) command.Result {
-	return s.helm.runner.RunCommand(name, args...)
-}
-
-func (sec *Secret) runCommand(name string, args ...string) command.Result {
-	return sec.helm.runner.RunCommand(name, args...)
-}
-
-func (c *ConfigMap) runCommand(name string, args ...string) command.Result {
-	return c.helm.runner.RunCommand(name, args...)
-}
-
-func (p *PVC) runCommand(name string, args ...string) command.Result {
-	return p.helm.runner.RunCommand(name, args...)
-}
-
-func (p *Pod) resolvePodName() error {
-	args := []string{"get", "pods", "-n", p.namespace, "-l", p.selector,
-		"-o", "jsonpath={.items[0].metadata.name}"}
-	p.lastResult = p.runCommand("kubectl", args...)
-	if p.lastResult.Err != nil {
-		return fmt.Errorf("failed to get pod name: %w", p.lastResult.Err)
-	}
-	p.name = strings.TrimSpace(p.lastResult.Stdout)
-	if p.name == "" {
-		return fmt.Errorf("no pod found with selector: %s", p.selector)
-	}
-	return nil
-}
-
-// Namespace represents a Kubernetes namespace with fluent interface
-type Namespace struct {
-	name        string
-	colorOutput bool
-	runner      *command.Runner
-	lastResult  command.Result
-	lastError   error
-}
-
-// NewNamespace creates a new Namespace accessor
-func NewNamespace(name string) *Namespace {
-	return &Namespace{
-		name:        name,
-		colorOutput: true,
-		runner:      command.NewCommandRunner(true),
-	}
-}
-
-// Create creates the namespace
-func (n *Namespace) Create() *Namespace {
-	result := n.runCommand("kubectl", "create", "namespace", n.name)
-	if result.Err != nil && strings.Contains(result.Stderr, "already exists") {
-		// Namespace already exists, that's ok
-		n.lastError = nil
-	} else if result.Err != nil {
-		n.lastError = fmt.Errorf("failed to create namespace: %s", result.String())
-	}
-	n.lastResult = result
-	return n
-}
-
-// Delete deletes the namespace
-func (n *Namespace) Delete() *Namespace {
-	result := n.runCommand("kubectl", "delete", "namespace", n.name, "--wait=false")
-	if result.Err != nil {
-		n.lastError = fmt.Errorf("failed to delete namespace: %s", result.String())
-	}
-	n.lastResult = result
-	return n
-}
-
-// MustSucceed panics if there was an error
-func (n *Namespace) MustSucceed() *Namespace {
-	if n.lastError != nil {
-		panic(n.lastError)
-	}
-	return n
-}
-
-func (n *Namespace) runCommand(name string, args ...string) command.Result {
-	return n.runner.RunCommand(name, args...)
 }

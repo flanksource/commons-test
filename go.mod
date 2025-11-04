@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	github.com/bsm/gomega v1.27.10
-	github.com/flanksource/clicky v1.9.0
+	github.com/flanksource/clicky v1.11.0
 	github.com/flanksource/commons v1.42.3
 	github.com/flanksource/commons-db v0.1.0
 	github.com/hexops/gotextdiff v1.0.3
@@ -227,6 +227,6 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 )
 
-//replace github.com/flanksource/clicky => ../clicky
+// replace github.com/flanksource/clicky => ../clicky
 
 // replace github.com/flanksource/commons-db => ../commons-db
