@@ -1,18 +1,20 @@
 package helm
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/flanksource/clicky"
+	"github.com/flanksource/clicky/api"
 	clickyExec "github.com/flanksource/clicky/exec"
 	flanksourceCtx "github.com/flanksource/commons-db/context"
+	"github.com/flanksource/commons-db/kubernetes"
 	"github.com/flanksource/commons-test/command"
+	"github.com/flanksource/commons/logger"
 	"github.com/flanksource/gomplate/v3/base64"
 	"sigs.k8s.io/yaml"
 )
@@ -20,11 +22,13 @@ import (
 type Helm = clickyExec.WrapperFunc
 
 var kubectl clickyExec.WrapperFunc = clicky.Exec("kubectl").AsWrapper()
-var helm clickyExec.WrapperFunc = clicky.Exec("helm").AsWrapper()
+var helm clickyExec.WrapperFunc = clicky.Exec("helm").Debug().AsWrapper()
+var bash clickyExec.WrapperFunc = clicky.Exec("bash").Debug().AsWrapper()
 
 // HelmChart represents a Helm chart with fluent interface
 type HelmChart struct {
 	flanksourceCtx.Context
+	client      *kubernetes.Client
 	releaseName string
 	namespace   string
 	chartPath   string
@@ -84,6 +88,7 @@ func (h *HelmChart) SetValue(key string, value interface{}) *HelmChart {
 			m = m[part].(map[string]interface{})
 		}
 	}
+	h.values = m
 	return h
 }
 
@@ -120,34 +125,42 @@ func (h *HelmChart) NoColor() *HelmChart {
 	return h
 }
 
+func (h *HelmChart) InstallOrUpgrade() error {
+
+	status, _ := h.GetStatus()
+	if status != nil {
+		return h.Upgrade()
+	}
+	return h.Install()
+}
+
 // Install installs the Helm chart
-func (h *HelmChart) Install() *HelmChart {
+func (h *HelmChart) Install() error {
+	logger.Infof("Installing Helm chart %s in namespace %s", h.chartPath, h.namespace)
 	if h.releaseName == "" {
-		h.lastError = fmt.Errorf("release name is required")
-		return h
+		return fmt.Errorf("release name is required")
 	}
 
 	h.helm = h.command()
-	h.lastResult, h.lastError = h.helm("install", h.releaseName, h.chartPath, "--create-namespace")
-	if h.lastError != nil {
-		h.collectDiagnostics()
-	}
-	return h
+	result, err := h.helm("install", h.releaseName, h.chartPath, "--create-namespace", "--force")
+	logger.Errorf(result.Pretty().ANSI())
+	logger.Errorf(result.Output())
+	return err
 }
 
 // Upgrade upgrades the Helm release
-func (h *HelmChart) Upgrade() *HelmChart {
+func (h *HelmChart) Upgrade() error {
+	logger.Infof("Upgrading Helm chart %s in namespace %s", h.chartPath, h.namespace)
+
 	if h.releaseName == "" {
-		h.lastError = fmt.Errorf("release name is required")
-		return h
+		return fmt.Errorf("release name is required")
 	}
 	h.helm = h.command()
 
-	h.lastResult, h.lastError = h.helm("upgrade", h.releaseName, h.chartPath)
-	if h.lastError != nil {
-		h.collectDiagnostics()
-	}
-	return h
+	result, err := h.helm("upgrade", h.releaseName, h.chartPath)
+	logger.Infof(result.Pretty().ANSI())
+	logger.Errorf(result.Output())
+	return err
 }
 
 // Delete deletes the Helm release
@@ -215,10 +228,56 @@ func (h *HelmChart) GetPVC(name string) *PVC {
 	}
 }
 
+type HelmStatusInfo struct {
+	FirstDeployed string `json:"first_deployed"`
+	LastDeployed  string `json:"last_deployed"`
+	Deleted       string `json:"deleted"`
+	Description   string `json:"description"`
+	Status        string `json:"status"`
+}
+
+type HelmStatus struct {
+	Name      string         `json:"name"`
+	Info      HelmStatusInfo `json:"info"`
+	Manifest  string         `json:"manifest"`
+	Version   int            `json:"version"`
+	Namespace string         `json:"namespace"`
+}
+
+func (s HelmStatus) Pretty() api.Text {
+	t := clicky.Text(s.Namespace).Append("/", "text-muted").Append(s.Name).Append(" v", "text-muted").Append(s.Version)
+	if s.Info.Status != "deployed" {
+		t = t.Append(" ("+s.Info.Status+")", "text-red-500")
+	}
+	if s.Info.Description != "" {
+		t = t.Append(" - "+s.Info.Description, "text-muted")
+	}
+	return t
+}
+
 // Status returns the Helm release status
 func (h *HelmChart) Status() (string, error) {
 	result, err := helm("status", h.releaseName, "--namespace", h.namespace)
 	return result.Stdout, err
+}
+
+// Status returns the Helm release status
+func (h *HelmChart) GetStatus() (*HelmStatus, error) {
+	if h == nil {
+		return nil, fmt.Errorf("helm chart is nil")
+	}
+	var status HelmStatus
+	result, err := bash("-c", fmt.Sprintf("helm status %s --namespace %s -o json | jq -s '.[-1] | del(.manifest) | del(.hooks)'", h.releaseName, h.namespace))
+	if err != nil {
+		return nil, err
+	}
+	if result.Stdout == "null" || result.Stderr == "Error: release: not found\n" {
+		return nil, fmt.Errorf("release %s not found in namespace %s", h.releaseName, h.namespace)
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
 }
 
 // Error returns the last error
@@ -234,6 +293,7 @@ func (h *HelmChart) Result() *clickyExec.ExecResult {
 // MustSucceed panics if there was an error
 func (h *HelmChart) MustSucceed() *HelmChart {
 	if h.lastError != nil {
+		_, _ = os.Stderr.WriteString(h.lastResult.Pretty().ANSI())
 		panic(h.lastError)
 	}
 	return h
@@ -247,6 +307,36 @@ func (h *HelmChart) Matches(o Object) bool {
 		return false
 	}
 	return true
+}
+
+func (h *HelmChart) Kubectl() clickyExec.WrapperFunc {
+	return func(args ...any) (*clickyExec.ExecResult, error) {
+		if h.namespace != "" {
+			args = append(args, "--namespace", h.namespace)
+		}
+		return kubectl(args...)
+	}
+}
+
+type Deployment struct {
+	Name      string
+	Namespace string
+	helm      *HelmChart
+}
+
+func (d *Deployment) GetReplicas() (int, error) {
+	args := []any{"get", "deployment", d.Name, "-n", d.Namespace,
+		"-o", "jsonpath={.status.readyReplicas}"}
+	p, err := kubectl(args...)
+	if err != nil {
+		return 0, err
+	}
+
+	i, err := strconv.Atoi(p.Stdout)
+	if err != nil {
+		return 0, err
+	}
+	return i, nil
 }
 
 // StatefulSet represents a Kubernetes StatefulSet
@@ -390,15 +480,15 @@ func (h *HelmChart) command(args ...string) Helm {
 		valuesYaml, err := yaml.Marshal(h.values)
 		if err != nil {
 			h.lastError = fmt.Errorf("failed to marshal values: %w", err)
+			logger.Errorf("failed to marshal values: %v", err)
 			return nil
 		}
 
 		// Write values to temp file
-		tempFile := fmt.Sprintf("/tmp/helm-values-%d.yaml", time.Now().UnixNano())
-		cmd := exec.Command("sh", "-c", fmt.Sprintf("cat > %s", tempFile))
-		cmd.Stdin = bytes.NewReader(valuesYaml)
-		if err := cmd.Run(); err != nil {
+		tempFile := "helm-test-values.yaml"
+		if err := os.WriteFile(tempFile, valuesYaml, 0644); err != nil {
 			h.lastError = fmt.Errorf("failed to write values file: %w", err)
+			logger.Errorf("failed to write values file: %v", err)
 			return nil
 		}
 
@@ -412,7 +502,7 @@ func (h *HelmChart) command(args ...string) Helm {
 }
 
 func (h *HelmChart) collectDiagnostics() {
-	if !h.colorOutput {
+	if 1 == 1 {
 		return
 	}
 

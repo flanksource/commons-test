@@ -8,7 +8,10 @@ import (
 
 	"github.com/flanksource/clicky"
 	"github.com/flanksource/clicky/exec"
+	"github.com/flanksource/commons-db/kubernetes"
 	"github.com/flanksource/commons-test/command"
+	"github.com/flanksource/commons/logger"
+	"github.com/flanksource/deps"
 	"github.com/samber/lo"
 )
 
@@ -231,5 +234,26 @@ func (k Kind) Kubectl() exec.WrapperFunc {
 	p := clicky.Exec("kubectl", "--context", fmt.Sprintf("kind-%s", k.Name), "--kubeconfig", tempFile)
 	k.kubectl = lo.ToPtr(p.AsWrapper())
 	return *k.kubectl
+
+}
+
+func SetupIngress(client *kubernetes.Client) error {
+	deps.Install("arkade")
+
+	arkade := clicky.Exec("arkade").AsWrapper()
+
+	resp, err := arkade("install", "ingress-nginx")
+	if resp != nil {
+		logger.Infof(resp.PrettyFull().ANSI())
+	}
+	if err != nil {
+		return err
+	}
+	resp, err = arkade("install", "cert-manager")
+	if resp != nil {
+		logger.Infof(resp.PrettyFull().ANSI())
+	}
+
+	return err
 
 }
