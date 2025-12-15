@@ -9,10 +9,11 @@ import (
 	"github.com/flanksource/clicky"
 	"github.com/flanksource/clicky/exec"
 	"github.com/flanksource/commons-db/kubernetes"
-	"github.com/flanksource/commons-test/command"
 	"github.com/flanksource/commons/logger"
 	"github.com/flanksource/deps"
 	"github.com/samber/lo"
+
+	"github.com/flanksource/commons-test/command"
 )
 
 type Kind struct {
@@ -238,7 +239,7 @@ func (k Kind) Kubectl() exec.WrapperFunc {
 }
 
 func SetupIngress(client *kubernetes.Client) error {
-	deps.Install("arkade")
+	deps.Install("arkade", "latest")
 
 	arkade := clicky.Exec("arkade").AsWrapper()
 
