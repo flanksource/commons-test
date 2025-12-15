@@ -13,10 +13,11 @@ import (
 	clickyExec "github.com/flanksource/clicky/exec"
 	flanksourceCtx "github.com/flanksource/commons-db/context"
 	"github.com/flanksource/commons-db/kubernetes"
-	"github.com/flanksource/commons-test/command"
 	"github.com/flanksource/commons/logger"
 	"github.com/flanksource/gomplate/v3/base64"
 	"sigs.k8s.io/yaml"
+
+	"github.com/flanksource/commons-test/command"
 )
 
 type Helm = clickyExec.WrapperFunc
@@ -142,7 +143,7 @@ func (h *HelmChart) Install() error {
 	}
 
 	h.helm = h.command()
-	result, err := h.helm("install", h.releaseName, h.chartPath, "--create-namespace", "--force")
+	result, err := h.helm("install", h.releaseName, h.chartPath, "--create-namespace", "--force-replace")
 	logger.Errorf(result.Pretty().ANSI())
 	logger.Errorf(result.Output())
 	return err
@@ -468,7 +469,7 @@ func (h *HelmChart) command(args ...string) Helm {
 		args = append(args, "--wait")
 	}
 	if h.timeout > 0 {
-		args = append(args, "--timeout", h.timeout.String())
+		args = append(args, fmt.Sprintf("--timeout=%s", h.timeout.String()))
 	}
 
 	if h.dryRun {
