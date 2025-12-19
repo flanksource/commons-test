@@ -29,16 +29,17 @@ var bash clickyExec.WrapperFunc = clicky.Exec("bash").Debug().AsWrapper()
 // HelmChart represents a Helm chart with fluent interface
 type HelmChart struct {
 	flanksourceCtx.Context
-	client      *kubernetes.Client
-	releaseName string
-	namespace   string
-	chartPath   string
-	values      map[string]interface{}
-	wait        bool
-	timeout     time.Duration
-	colorOutput bool
-	dryRun      bool
-	helm        Helm
+	client         *kubernetes.Client
+	releaseName    string
+	namespace      string
+	chartPath      string
+	values         map[string]interface{}
+	wait           bool
+	timeout        time.Duration
+	colorOutput    bool
+	dryRun         bool
+	helm           Helm
+	forceConflicts bool
 
 	lastResult *clickyExec.ExecResult
 	lastError  error
@@ -72,6 +73,11 @@ func (h *HelmChart) Values(values map[string]interface{}) *HelmChart {
 	for k, v := range values {
 		h.values[k] = v
 	}
+	return h
+}
+
+func (h *HelmChart) ForceConflicts() *HelmChart {
+	h.forceConflicts = true
 	return h
 }
 
@@ -468,6 +474,11 @@ func (h *HelmChart) command(args ...string) Helm {
 	if h.wait {
 		args = append(args, "--wait")
 	}
+
+	if h.forceConflicts {
+		args = append(args, "--force-conflicts")
+	}
+
 	if h.timeout > 0 {
 		args = append(args, fmt.Sprintf("--timeout=%s", h.timeout.String()))
 	}
