@@ -40,6 +40,7 @@ type HelmChart struct {
 	dryRun         bool
 	helm           Helm
 	forceConflicts bool
+	forceReplace   bool
 
 	lastResult *clickyExec.ExecResult
 	lastError  error
@@ -78,6 +79,11 @@ func (h *HelmChart) Values(values map[string]interface{}) *HelmChart {
 
 func (h *HelmChart) ForceConflicts() *HelmChart {
 	h.forceConflicts = true
+	return h
+}
+
+func (h *HelmChart) ForceReplace() *HelmChart {
+	h.forceReplace = true
 	return h
 }
 
@@ -149,7 +155,7 @@ func (h *HelmChart) Install() error {
 	}
 
 	h.helm = h.command()
-	result, err := h.helm("install", h.releaseName, h.chartPath, "--create-namespace", "--force-replace")
+	result, err := h.helm("install", h.releaseName, h.chartPath, "--create-namespace")
 	logger.Errorf(result.Pretty().ANSI())
 	logger.Errorf(result.Output())
 	return err
@@ -477,6 +483,10 @@ func (h *HelmChart) command(args ...string) Helm {
 
 	if h.forceConflicts {
 		args = append(args, "--force-conflicts")
+	}
+
+	if h.forceReplace {
+		args = append(args, "--force-replace")
 	}
 
 	if h.timeout > 0 {
