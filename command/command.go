@@ -142,7 +142,7 @@ func (c *Runner) streamOutput(reader io.Reader, prefix string, color string, buf
 
 func (c *Runner) Debugf(format string, args ...interface{}) {
 	if c.ColorOutput {
-		fmt.Printf(colorGray, colorBold, fmt.Sprintf(format, args...), colorReset)
+		fmt.Printf("%s%s%s%s\n", colorGray, colorBold, fmt.Sprintf(format, args...), colorReset)
 	} else {
 		fmt.Printf(format+"\n", args...)
 	}
@@ -150,7 +150,7 @@ func (c *Runner) Debugf(format string, args ...interface{}) {
 
 func (c *Runner) Infof(format string, args ...interface{}) {
 	if c.ColorOutput {
-		fmt.Printf(colorBlue, colorBold, fmt.Sprintf(format, args...), colorReset)
+		fmt.Printf("%s%s%s%s\n", colorBlue, colorBold, fmt.Sprintf(format, args...), colorReset)
 	} else {
 		fmt.Printf(format+"\n", args...)
 	}
@@ -158,7 +158,7 @@ func (c *Runner) Infof(format string, args ...interface{}) {
 
 func (c *Runner) Errorf(format string, args ...interface{}) {
 	if c.ColorOutput {
-		fmt.Printf(colorRed, colorBold, fmt.Sprintf(format, args...), colorReset)
+		fmt.Printf("%s%s%s%s\n", colorRed, colorBold, fmt.Sprintf(format, args...), colorReset)
 	} else {
 		fmt.Printf(format+"\n", args...)
 	}
