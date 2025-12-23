@@ -266,6 +266,7 @@ func (k Kind) setupServices() error {
 	if slices.Contains(k.Services, ServiceLocalStack) {
 		logger.Infof("Installing Localstack")
 		lsc := helm.NewHelmChart(context.New(), "localstack/localstack").
+			Repository("localstack", "https://localstack.github.io/helm-charts").
 			Release("localstack").Namespace("default").WaitFor(5 * time.Minute)
 		if err := lsc.InstallOrUpgrade(); err != nil {
 			return err
