@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/flanksource/commons/http"
+	"github.com/google/uuid"
 )
 
 type MissionControl struct {
@@ -116,6 +118,88 @@ func (mc *MissionControl) QueryCatalog(selector ResourceSelector) ([]SelectedRes
 
 func (mc *MissionControl) SearchCatalog(search string) ([]SelectedResource, error) {
 	return mc.QueryCatalog(ResourceSelector{Search: search})
+}
+
+type CatalogChangesSearchRequest struct {
+	CatalogID             string `query:"id" json:"id"`
+	ConfigType            string `query:"config_type" json:"config_type"`
+	ChangeType            string `query:"type" json:"type"`
+	Severity              string `query:"severity" json:"severity"`
+	IncludeDeletedConfigs bool   `query:"include_deleted_configs" json:"include_deleted_configs"`
+	Depth                 int    `query:"depth" json:"depth"`
+	CreatedByRaw          string `query:"created_by" json:"created_by"`
+	Summary               string `query:"summary" json:"summary"`
+	Source                string `query:"source" json:"source"`
+	Tags                  string `query:"tags" json:"tags"`
+
+	// To Fetch from a particular agent, provide the agent id.
+	// Use `local` keyword to filter by the local agent.
+	AgentID string `query:"agent_id" json:"agent_id"`
+
+	// From date in datemath format
+	From string `query:"from" json:"from"`
+	// To date in datemath format
+	To string `query:"to" json:"to"`
+
+	PageSize  int    `query:"page_size" json:"page_size"`
+	Page      int    `query:"page" json:"page"`
+	SortBy    string `query:"sort_by" json:"sort_by"`
+	sortOrder string
+
+	// upstream | downstream | both
+	Recursive string `query:"recursive" json:"recursive"`
+
+	// FIXME: Soft toggle does not work with Recursive=both
+	// In that case, soft relations are always returned
+	// It also returns ALL soft relations throughout the tree
+	// not just soft related to the main config item
+	Soft bool `query:"soft" json:"soft"`
+}
+
+type ConfigChangeRow struct {
+	AgentID           string            `gorm:"column:agent_id" json:"agent_id"`
+	ExternalChangeId  string            `gorm:"column:external_change_id" json:"external_change_id"`
+	ID                string            `gorm:"primaryKey;unique_index;not null;column:id" json:"id"`
+	ConfigID          string            `gorm:"column:config_id;default:''" json:"config_id"`
+	DeletedAt         *time.Time        `gorm:"column:deleted_at" json:"deleted_at,omitempty"`
+	ChangeType        string            `gorm:"column:change_type" json:"change_type" faker:"oneof:  RunInstances, diff"`
+	Severity          string            `gorm:"column:severity" json:"severity"  faker:"oneof: critical, high, medium, low, info"`
+	Source            string            `gorm:"column:source" json:"source"`
+	Summary           string            `gorm:"column:summary;default:null" json:"summary,omitempty"`
+	CreatedAt         *time.Time        `gorm:"column:created_at" json:"created_at"`
+	Count             int               `gorm:"column:count" json:"count"`
+	FirstObserved     *time.Time        `gorm:"column:first_observed" json:"first_observed,omitempty"`
+	ConfigName        string            `gorm:"column:name" json:"name,omitempty"`
+	ConfigType        string            `gorm:"column:type" json:"type,omitempty"`
+	Tags              map[string]string `gorm:"column:tags" json:"tags,omitempty"`
+	CreatedBy         *uuid.UUID        `gorm:"column:created_by" json:"created_by,omitempty"`
+	ExternalCreatedBy string            `gorm:"column:external_created_by" json:"external_created_by,omitempty"`
+}
+
+type CatalogChangesSearchResponse struct {
+	Summary map[string]int    `json:"summary,omitempty"`
+	Total   int64             `json:"total,omitempty"`
+	Changes []ConfigChangeRow `json:"changes,omitempty"`
+}
+
+func (mc *MissionControl) SearchCatalogChanges(req CatalogChangesSearchRequest) (*CatalogChangesSearchResponse, error) {
+	r, err := mc.HTTP.R(context.TODO()).Header("content-type", "application/json").Post("/catalog/changes", req)
+	if err != nil {
+		return nil, err
+	}
+
+	if !r.IsOK() {
+		body, _ := r.AsString()
+		return nil, fmt.Errorf("query catalog failed: %s", body)
+	}
+
+	var response CatalogChangesSearchResponse
+	if err := r.Into(&response); err != nil {
+		return nil, err
+	}
+
+	return &response, nil
+
 }
 
 func (mc *MissionControl) IsHealthy() (bool, error) {
