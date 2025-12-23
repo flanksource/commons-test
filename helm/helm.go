@@ -23,7 +23,7 @@ import (
 type Helm = clickyExec.WrapperFunc
 
 var kubectl clickyExec.WrapperFunc = clicky.Exec("kubectl").AsWrapper()
-var helm clickyExec.WrapperFunc = clicky.Exec("helm").Debug().AsWrapper()
+var helm clickyExec.WrapperFunc = clicky.Exec("helm").AsWrapper()
 var bash clickyExec.WrapperFunc = clicky.Exec("bash").AsWrapper()
 
 // HelmChart represents a Helm chart with fluent interface
@@ -31,6 +31,8 @@ type HelmChart struct {
 	flanksourceCtx.Context
 	client         *kubernetes.Client
 	releaseName    string
+	repository     string
+	repositoryURL  string
 	namespace      string
 	chartPath      string
 	values         map[string]interface{}
@@ -66,6 +68,13 @@ func (h *HelmChart) Release(name string) *HelmChart {
 // Namespace sets the namespace
 func (h *HelmChart) Namespace(ns string) *HelmChart {
 	h.namespace = ns
+	return h
+}
+
+// Repository sets the repository
+func (h *HelmChart) Repository(repo, url string) *HelmChart {
+	h.repository = repo
+	h.repositoryURL = url
 	return h
 }
 
@@ -139,7 +148,6 @@ func (h *HelmChart) NoColor() *HelmChart {
 }
 
 func (h *HelmChart) InstallOrUpgrade() error {
-
 	status, _ := h.GetStatus()
 	if status != nil {
 		return h.Upgrade()
@@ -147,11 +155,35 @@ func (h *HelmChart) InstallOrUpgrade() error {
 	return h.Install()
 }
 
+func (h HelmChart) addAndUpdateRepository(repo, url string) error {
+	p := clicky.Exec("helm", "repo", "add", repo, url).Run()
+	if p.Err != nil {
+		return p.Err
+	}
+	if p.ExitCode() != 0 {
+		return fmt.Errorf("%s %v => code=%d stderr=%s stdout=%s", p.Cmd, p.Args, p.ExitCode(), p.Result().Stderr, p.Result().Stdout)
+	}
+
+	p = clicky.Exec("helm", "repo", "update", repo).Run()
+	if p.Err != nil {
+		return p.Err
+	}
+	if p.ExitCode() != 0 {
+		return fmt.Errorf("%s %v => code=%d stderr=%s stdout=%s", p.Cmd, p.Args, p.ExitCode(), p.Result().Stderr, p.Result().Stdout)
+	}
+
+	return nil
+}
+
 // Install installs the Helm chart
 func (h *HelmChart) Install() error {
 	logger.Infof("Installing Helm chart %s in namespace %s", h.chartPath, h.namespace)
 	if h.releaseName == "" {
 		return fmt.Errorf("release name is required")
+	}
+
+	if h.repository != "" && h.repositoryURL != "" {
+		h.addAndUpdateRepository(h.repository, h.repositoryURL)
 	}
 
 	h.helm = h.command()
