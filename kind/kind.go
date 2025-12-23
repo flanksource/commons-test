@@ -3,17 +3,20 @@ package kind
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/flanksource/clicky"
 	"github.com/flanksource/clicky/exec"
+	"github.com/flanksource/commons-db/context"
 	"github.com/flanksource/commons-db/kubernetes"
 	"github.com/flanksource/commons/logger"
 	"github.com/flanksource/deps"
 	"github.com/samber/lo"
 
 	"github.com/flanksource/commons-test/command"
+	"github.com/flanksource/commons-test/helm"
 )
 
 type Kind struct {
@@ -26,6 +29,8 @@ type Kind struct {
 	kubectl    *exec.WrapperFunc
 	lastResult command.Result
 	lastError  error
+
+	Services []string
 }
 
 // NewKind creates a new Kind cluster manager
@@ -54,6 +59,11 @@ func (k *Kind) NoColor() *Kind {
 	return k
 }
 
+func (k *Kind) WithServices(svcs ...string) *Kind {
+	k.Services = svcs
+	return k
+}
+
 // GetOrCreate gets an existing kind cluster or creates a new one
 func (k *Kind) GetOrCreate() *Kind {
 	// Check if cluster already exists
@@ -64,6 +74,10 @@ func (k *Kind) GetOrCreate() *Kind {
 			if cluster == k.Name {
 				k.runner.Debugf("Using existing cluster: %s", k.Name)
 				k.Use()
+				if err := k.setupServices(); err != nil {
+					k.lastError = fmt.Errorf("failed to setup services: %w", err)
+					return k
+				}
 				return k
 			}
 		}
@@ -88,6 +102,12 @@ func (k *Kind) GetOrCreate() *Kind {
 	k.waitForCluster()
 
 	k.Use()
+
+	logger.Infof("Setting up services")
+	if err := k.setupServices(); err != nil {
+		k.lastError = fmt.Errorf("failed to setup services: %w", err)
+		return k
+	}
 	return k
 }
 
@@ -236,6 +256,22 @@ func (k Kind) Kubectl() exec.WrapperFunc {
 	k.kubectl = lo.ToPtr(p.AsWrapper())
 	return *k.kubectl
 
+}
+
+const (
+	ServiceLocalStack = "localstack"
+)
+
+func (k Kind) setupServices() error {
+	if slices.Contains(k.Services, ServiceLocalStack) {
+		logger.Infof("Installing Localstack")
+		lsc := helm.NewHelmChart(context.New(), "localstack/localstack").
+			Release("localstack").Namespace("default").WaitFor(5 * time.Minute)
+		if err := lsc.InstallOrUpgrade(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func SetupIngress(client *kubernetes.Client) error {

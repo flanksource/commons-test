@@ -24,7 +24,7 @@ type Helm = clickyExec.WrapperFunc
 
 var kubectl clickyExec.WrapperFunc = clicky.Exec("kubectl").AsWrapper()
 var helm clickyExec.WrapperFunc = clicky.Exec("helm").Debug().AsWrapper()
-var bash clickyExec.WrapperFunc = clicky.Exec("bash").Debug().AsWrapper()
+var bash clickyExec.WrapperFunc = clicky.Exec("bash").AsWrapper()
 
 // HelmChart represents a Helm chart with fluent interface
 type HelmChart struct {
@@ -473,7 +473,6 @@ func (p *PVC) Status() (map[string]interface{}, error) {
 // Helper methods
 
 func (h *HelmChart) command(args ...string) Helm {
-
 	if h.namespace != "" {
 		args = append(args, "--namespace", h.namespace)
 	}
