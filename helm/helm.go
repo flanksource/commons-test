@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -538,7 +539,7 @@ func (h *HelmChart) command(args ...string) Helm {
 		}
 
 		// Write values to temp file
-		tempFile := "helm-test-values.yaml"
+		tempFile := path.Join(os.TempDir(), fmt.Sprintf("helm-test-values-%s.yaml", time.Now().Format("2006-01-02-15-04-05")))
 		if err := os.WriteFile(tempFile, valuesYaml, 0644); err != nil {
 			h.lastError = fmt.Errorf("failed to write values file: %w", err)
 			logger.Errorf("failed to write values file: %v", err)
