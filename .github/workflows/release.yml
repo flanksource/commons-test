@@ -19,7 +19,7 @@ jobs:
 
       - name: Calculate next version
         id: version
-        uses: charlesthomas/github-action-svu@v1.1.4+3.2.3
+        uses: charlesthomas/github-action-svu@v1.1.4+3.2.4
         with:
           cmd: patch
           pushTag: true
