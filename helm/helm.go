@@ -111,7 +111,6 @@ func (h *HelmChart) SetValue(key string, value interface{}) *HelmChart {
 			m = m[part].(map[string]interface{})
 		}
 	}
-	h.values = m
 	return h
 }
 
