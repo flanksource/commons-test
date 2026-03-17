@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/flanksource/clicky"
 	"github.com/flanksource/commons/logger"
-	. "github.com/onsi/ginkgo/v2"
 )
 
 const (
@@ -29,7 +29,7 @@ type Container struct {
 // New creates a new Container manager
 func New(config Config) (*Container, error) {
 	return &Container{
-		Logger: logger.GetLogger(),
+		Logger: logger.GetLogger("docker").Named(config.Name),
 		config: config,
 	}, nil
 }
@@ -40,7 +40,7 @@ func (c *Container) Start(ctx context.Context) error {
 	if c.config.Reuse {
 		if err := c.findAndReuseContainer(ctx); err != nil {
 			// Log warning but continue to create new container
-			fmt.Printf("Warning: failed to reuse existing container: %v\n", err)
+			c.Warnf("Failed to reuse existing container: %v", err)
 		} else if c.containerID != "" {
 			// Successfully reused container
 			return c.ensureContainerRunning(ctx)
@@ -183,7 +183,7 @@ func (c *Container) findAndReuseContainer(ctx context.Context) error {
 
 	output := strings.TrimSpace(process.GetStdout())
 	if output == "" {
-		return fmt.Errorf("container with name %s not found", c.config.Name)
+		return nil // not found — caller will create a new container
 	}
 
 	// Parse output: ID<tab>Status
@@ -197,10 +197,10 @@ func (c *Container) findAndReuseContainer(ctx context.Context) error {
 	return nil
 }
 
-// ensureContainerRunning starts the container if it's not running
+// ensureContainerRunning starts the container if it's not running and waits for readiness.
 func (c *Container) ensureContainerRunning(ctx context.Context) error {
 	if c.isRunning {
-		return nil
+		return c.waitForStableState(ctx)
 	}
 
 	process := clicky.Exec("docker", "start", c.containerID).Run()
@@ -209,7 +209,7 @@ func (c *Container) ensureContainerRunning(ctx context.Context) error {
 	}
 
 	c.isRunning = true
-	return nil
+	return c.waitForStableState(ctx)
 }
 
 // createAndStartContainer creates and starts a new container
@@ -257,6 +257,23 @@ func (c *Container) createAndStartContainer(ctx context.Context) error {
 		}
 	}
 
+	// Add health check
+	if hc := c.config.HealthCheck; hc != nil {
+		args = append(args, "--health-cmd", hc.Cmd)
+		if hc.Interval > 0 {
+			args = append(args, "--health-interval", hc.Interval.String())
+		}
+		if hc.Timeout > 0 {
+			args = append(args, "--health-timeout", hc.Timeout.String())
+		}
+		if hc.Retries > 0 {
+			args = append(args, "--health-retries", fmt.Sprintf("%d", hc.Retries))
+		}
+		if hc.StartPeriod > 0 {
+			args = append(args, "--health-start-period", hc.StartPeriod.String())
+		}
+	}
+
 	// Add image
 	args = append(args, c.config.Image)
 
@@ -287,16 +304,6 @@ func (c *Container) createAndStartContainer(ctx context.Context) error {
 	c.isRunning = true
 	c.Infof("Container startup completed successfully")
 	return nil
-}
-
-// Infof logs an informational message with container name prefix
-func (c *Container) Infof(format string, args ...interface{}) {
-	GinkgoWriter.Printf("[%s] %s\n", c.config.Name, fmt.Sprintf(format, args...))
-}
-
-// Errorf logs an error message with container name prefix
-func (c *Container) Errorf(format string, args ...interface{}) {
-	GinkgoWriter.Printf("[%s] ERROR: %s\n", c.config.Name, fmt.Sprintf(format, args...))
 }
 
 // PrintLogsOnFailure prints container logs when startup fails
@@ -354,52 +361,188 @@ func (c *Container) PrintLogsOnFailure(ctx context.Context, reason string) {
 	}
 }
 
-// waitForStableState waits for the container to reach a stable running state
+// waitForStableState waits for the container to reach a stable running state.
+// If a health check is configured, it waits for the container to become healthy.
+// Otherwise, it waits for all exposed ports to accept TCP connections.
 func (c *Container) waitForStableState(ctx context.Context) error {
-	// Wait a bit for container to fully start up
-	stabilityPeriod := 3 * time.Second
-	checkInterval := 500 * time.Millisecond
-	maxChecks := int(stabilityPeriod / checkInterval)
+	if c.config.HealthCheck != nil {
+		return c.waitForHealthy(ctx)
+	}
+	return c.waitForPorts(ctx)
+}
 
-	c.Infof("Monitoring container stability for %v...", stabilityPeriod)
+// waitForPorts polls all exposed ports until they accept TCP connections.
+func (c *Container) waitForPorts(ctx context.Context) error {
+	if len(c.config.Ports) == 0 {
+		return nil
+	}
 
-	for i := 0; i < maxChecks; i++ {
+	timeout := 2 * time.Minute
+	deadline := time.Now().Add(timeout)
+
+	for containerPort := range c.config.Ports {
+		hostPort, err := c.GetPort(containerPort)
+		if err != nil {
+			return fmt.Errorf("get host port for %s: %w", containerPort, err)
+		}
+
+		addr := "localhost:" + hostPort
+		c.Infof("Waiting for port %s (host %s)...", containerPort, hostPort)
+
+		ready := false
+		checks := 0
+		for time.Now().Before(deadline) {
+			conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
+			if dialErr == nil {
+				conn.Close()
+				c.Infof("Port %s is ready", containerPort)
+				ready = true
+				break
+			}
+			c.Tracef("Port %s dial failed: %v", containerPort, dialErr)
+
+			checks++
+			if checks%10 == 0 {
+				running, _ := c.IsRunning(ctx)
+				if !running {
+					diag := c.containerDiagnostics()
+					c.PrintLogsOnFailure(ctx, fmt.Sprintf("Container stopped while waiting for port %s: %s", containerPort, diag))
+					return fmt.Errorf("container stopped while waiting for port %s: %s", containerPort, diag)
+				}
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		if !ready {
+			diag := c.containerDiagnostics()
+			c.PrintLogsOnFailure(ctx, fmt.Sprintf("Port %s not ready after %v: %s", containerPort, timeout, diag))
+			return fmt.Errorf("timed out waiting for port %s: %s", containerPort, diag)
+		}
+	}
+	return nil
+}
+
+// containerDiagnostics returns a human-readable summary of why the container
+// is not ready: state, health check output, and port reachability.
+func (c *Container) containerDiagnostics() string {
+	var diag []string
+
+	// Container state
+	proc := clicky.Exec("docker", "inspect", "--format", "{{json .State}}", c.containerID).Run()
+	if proc.Err == nil {
+		var state struct {
+			Status   string `json:"Status"`
+			Running  bool   `json:"Running"`
+			ExitCode int    `json:"ExitCode"`
+			Error    string `json:"Error"`
+		}
+		if err := json.Unmarshal([]byte(proc.GetStdout()), &state); err == nil {
+			if !state.Running {
+				diag = append(diag, fmt.Sprintf("container state=%s (not running), exitCode=%d", state.Status, state.ExitCode))
+				if state.Error != "" {
+					diag = append(diag, fmt.Sprintf("docker error: %s", state.Error))
+				}
+			} else {
+				diag = append(diag, fmt.Sprintf("container state=%s", state.Status))
+			}
+		}
+	}
+
+	// Health check output (if configured)
+	if c.config.HealthCheck != nil {
+		hProc := clicky.Exec("docker", "inspect", "--format", "{{json .State.Health}}", c.containerID).Run()
+		if hProc.Err == nil {
+			var health struct {
+				Status string `json:"Status"`
+				Log    []struct {
+					Output   string `json:"Output"`
+					ExitCode int    `json:"ExitCode"`
+				} `json:"Log"`
+			}
+			if err := json.Unmarshal([]byte(hProc.GetStdout()), &health); err == nil {
+				diag = append(diag, fmt.Sprintf("healthcheck status=%s, cmd=%q", health.Status, c.config.HealthCheck.Cmd))
+				if len(health.Log) > 0 {
+					last := health.Log[len(health.Log)-1]
+					diag = append(diag, fmt.Sprintf("last healthcheck: exit=%d output=%s", last.ExitCode, strings.TrimSpace(last.Output)))
+				}
+			}
+		}
+	}
+
+	// Port reachability
+	for containerPort := range c.config.Ports {
+		hostPort, err := c.GetPort(containerPort)
+		if err != nil {
+			diag = append(diag, fmt.Sprintf("port %s: unable to resolve host port: %v", containerPort, err))
+			continue
+		}
+		conn, err := net.DialTimeout("tcp", "localhost:"+hostPort, 1*time.Second)
+		if err != nil {
+			diag = append(diag, fmt.Sprintf("port %s (host %s): not listening", containerPort, hostPort))
+		} else {
+			conn.Close()
+			diag = append(diag, fmt.Sprintf("port %s (host %s): listening", containerPort, hostPort))
+		}
+	}
+
+	if len(diag) == 0 {
+		return "no diagnostics available"
+	}
+	return strings.Join(diag, "; ")
+}
+
+func (c *Container) waitForHealthy(ctx context.Context) error {
+	timeout := 2 * time.Minute
+	checkInterval := 2 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	c.Infof("Waiting up to %v for container to become healthy...", timeout)
+
+	firstCheck := true
+	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Check container state using docker inspect
-		process := clicky.Exec("docker", "inspect", "--format", "{{json .State}}", c.containerID).Run()
-		if process.Err != nil {
-			c.Errorf("Failed to inspect container during stability check: %v", process.Err)
-			c.PrintLogsOnFailure(ctx, fmt.Sprintf("Failed to inspect container: %v", process.Err))
-			return fmt.Errorf("failed to inspect container: %w", process.Err)
+		process := clicky.Exec("docker", "inspect", "--format", "{{.State.Health.Status}}", c.containerID).Run()
+		if process.Err == nil {
+			status := strings.TrimSpace(process.GetStdout())
+			c.Tracef("Health status: %s", status)
+
+			if firstCheck && (status == "" || status == "<no value>") {
+				c.Warnf("No Docker health check registered on container, falling back to port readiness")
+				return c.waitForPorts(ctx)
+			}
+
+			switch status {
+			case "healthy":
+				c.Infof("Container is healthy")
+				return nil
+			case "unhealthy":
+				diag := c.containerDiagnostics()
+				c.PrintLogsOnFailure(ctx, fmt.Sprintf("Container became unhealthy: %s", diag))
+				return fmt.Errorf("container became unhealthy: %s", diag)
+			}
+		} else if firstCheck {
+			c.Warnf("Health check inspect failed, falling back to port readiness: %v", process.Err)
+			return c.waitForPorts(ctx)
+		} else {
+			c.Tracef("Health check inspect failed: %v", process.Err)
 		}
 
-		// Parse the state JSON
-		var state struct {
-			Running  bool   `json:"Running"`
-			Status   string `json:"Status"`
-			ExitCode int    `json:"ExitCode"`
-		}
-		if err := json.Unmarshal([]byte(process.GetStdout()), &state); err != nil {
-			return fmt.Errorf("failed to parse container state: %w", err)
-		}
-
-		if !state.Running {
-			failureReason := fmt.Sprintf("Container exited unexpectedly - Status: %s, ExitCode: %d",
-				state.Status, state.ExitCode)
-			c.PrintLogsOnFailure(ctx, failureReason)
-			return fmt.Errorf("container exited with status %s (exit code: %d)",
-				state.Status, state.ExitCode)
-		}
-
-		// Container is running, wait before next check
+		firstCheck = false
 		time.Sleep(checkInterval)
 	}
 
-	c.Infof("Container stability check passed - running consistently for %v", stabilityPeriod)
-	return nil
+	diag := c.containerDiagnostics()
+	c.PrintLogsOnFailure(ctx, fmt.Sprintf("Timed out waiting for healthy status: %s", diag))
+	return fmt.Errorf("timed out waiting for container to become healthy: %s", diag)
 }

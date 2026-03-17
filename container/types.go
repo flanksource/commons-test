@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // Manager provides container management capabilities
@@ -25,6 +26,15 @@ type Mount struct {
 	ReadOnly bool
 }
 
+// HealthCheck configures a Docker health check on the container.
+type HealthCheck struct {
+	Cmd         string        // Command to run (e.g. "curl -f http://localhost:3100/ready")
+	Interval    time.Duration // Time between checks (default 10s)
+	Timeout     time.Duration // Max time for a single check (default 5s)
+	Retries     int           // Consecutive failures before unhealthy (default 3)
+	StartPeriod time.Duration // Grace period before checks count (default 0s)
+}
+
 // Config holds container configuration
 type Config struct {
 	Image        string
@@ -32,6 +42,7 @@ type Config struct {
 	Ports        map[string]string // container_port:host_port
 	Env          []string
 	Mounts       []Mount
+	HealthCheck  *HealthCheck
 	WaitStrategy WaitStrategy
 	Reuse        bool
 }
