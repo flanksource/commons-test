@@ -148,6 +148,12 @@ func (h *HelmChart) NoColor() *HelmChart {
 }
 
 func (h *HelmChart) InstallOrUpgrade() error {
+	if h.repository != "" && h.repositoryURL != "" {
+		if err := h.addAndUpdateRepository(h.repository, h.repositoryURL); err != nil {
+			return err
+		}
+		h.chartPath = h.repository + "/" + h.chartPath
+	}
 	status, _ := h.GetStatus()
 	if status != nil {
 		return h.Upgrade()
@@ -177,15 +183,10 @@ func (h HelmChart) addAndUpdateRepository(repo, url string) error {
 
 // Install installs the Helm chart
 func (h *HelmChart) Install() error {
-	logger.Infof("Installing Helm chart %s in namespace %s", h.chartPath, h.namespace)
 	if h.releaseName == "" {
 		return fmt.Errorf("release name is required")
 	}
-
-	if h.repository != "" && h.repositoryURL != "" {
-		h.addAndUpdateRepository(h.repository, h.repositoryURL)
-	}
-
+	logger.Infof("Installing Helm chart %s in namespace %s", h.chartPath, h.namespace)
 	h.helm = h.command()
 	result, err := h.helm("install", h.releaseName, h.chartPath, "--create-namespace")
 	logger.Errorf(result.Pretty().ANSI())
