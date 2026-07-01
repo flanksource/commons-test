@@ -25,4 +25,6 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run fuzz tests
-        run: go test ./... -run=^$ -fuzz=Fuzz -fuzztime=30s
+        run: |
+          go test ./matchers -run=^$ -fuzz=^FuzzNormalizeJSON$ -fuzztime=30s
+          go test ./matchers -run=^$ -fuzz=^FuzzCompareJSON$ -fuzztime=30s
