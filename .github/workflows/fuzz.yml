@@ -1,0 +1,30 @@
+name: Fuzz Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '17 2 * * 1'
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run fuzz tests
+        run: |
+          go test ./matchers -run=^$ -fuzz=^FuzzNormalizeJSON$ -fuzztime=30s
+          go test ./matchers -run=^$ -fuzz=^FuzzCompareJSON$ -fuzztime=30s
