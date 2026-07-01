@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +12,8 @@ import (
 	"github.com/flanksource/clicky"
 	"github.com/flanksource/clicky/api"
 	clickyExec "github.com/flanksource/clicky/exec"
+	flanksourceCtx "github.com/flanksource/commons-db/context"
+	"github.com/flanksource/commons-db/kubernetes"
 	"github.com/flanksource/commons/logger"
 	"github.com/flanksource/gomplate/v3/base64"
 	"sigs.k8s.io/yaml"
@@ -28,8 +29,8 @@ var bash clickyExec.WrapperFunc = clicky.Exec("bash").AsWrapper()
 
 // HelmChart represents a Helm chart with fluent interface
 type HelmChart struct {
-	ctx            any
-	client         any
+	flanksourceCtx.Context
+	client         *kubernetes.Client
 	releaseName    string
 	repository     string
 	repositoryURL  string
@@ -49,9 +50,9 @@ type HelmChart struct {
 }
 
 // NewHelmChart creates a new HelmChart builder
-func NewHelmChart(ctx any, chartPath string) *HelmChart {
+func NewHelmChart(ctx flanksourceCtx.Context, chartPath string) *HelmChart {
 	return &HelmChart{
-		ctx:         ctx,
+		Context:     ctx,
 		chartPath:   chartPath,
 		colorOutput: true,
 		timeout:     5 * time.Minute,
@@ -118,24 +119,7 @@ func (h *HelmChart) GetValues() map[string]interface{} {
 }
 
 func (h *HelmChart) GetValue(path ...string) string {
-	if h.ctx == nil {
-		return ""
-	}
-	lookup := reflect.ValueOf(h.ctx).MethodByName("Lookup")
-	if !lookup.IsValid() {
-		return ""
-	}
-	builder := lookup.Call([]reflect.Value{reflect.ValueOf(h.namespace)})[0]
-	withHelmRef := builder.MethodByName("WithHelmRef")
-	if !withHelmRef.IsValid() {
-		return ""
-	}
-	builder = withHelmRef.Call([]reflect.Value{reflect.ValueOf(h.releaseName), reflect.ValueOf(strings.Join(path, "."))})[0]
-	mustGetString := builder.MethodByName("MustGetString")
-	if !mustGetString.IsValid() {
-		return ""
-	}
-	return mustGetString.Call(nil)[0].String()
+	return h.Context.Lookup(h.namespace).WithHelmRef(h.releaseName, strings.Join(path, ".")).MustGetString()
 }
 
 // Wait enables waiting for resources to be ready

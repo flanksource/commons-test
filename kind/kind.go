@@ -9,6 +9,8 @@ import (
 
 	"github.com/flanksource/clicky"
 	"github.com/flanksource/clicky/exec"
+	"github.com/flanksource/commons-db/context"
+	"github.com/flanksource/commons-db/kubernetes"
 	"github.com/flanksource/commons/logger"
 	"github.com/flanksource/deps"
 	"github.com/samber/lo"
@@ -263,7 +265,7 @@ const (
 func (k Kind) setupServices() error {
 	if slices.Contains(k.Services, ServiceLocalStack) {
 		logger.Infof("Installing Localstack")
-		lsc := helm.NewHelmChart(nil, "localstack/localstack").
+		lsc := helm.NewHelmChart(context.New(), "localstack/localstack").
 			Repository("localstack", "https://localstack.github.io/helm-charts").
 			Release("localstack").Namespace("default").WaitFor(5 * time.Minute)
 		if err := lsc.InstallOrUpgrade(); err != nil {
@@ -273,7 +275,7 @@ func (k Kind) setupServices() error {
 	return nil
 }
 
-func SetupIngress(client any) error {
+func SetupIngress(client *kubernetes.Client) error {
 	deps.Install("arkade", "latest")
 
 	arkade := clicky.Exec("arkade").AsWrapper()
