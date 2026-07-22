@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	github.com/bsm/gomega v1.27.10
 	github.com/flanksource/clicky v1.21.11
-	github.com/flanksource/commons v1.52.0
+	github.com/flanksource/commons v1.53.1
 	github.com/flanksource/deps v1.0.26
 	github.com/flanksource/gomplate/v3 v3.24.81
 	github.com/google/uuid v1.6.0
